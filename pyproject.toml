@@ -21,6 +21,7 @@ classifiers = [
 ]
 dependencies = [
     "duckdb>=1.1",
+    "platformdirs>=4.0",
     "psycopg[binary]>=3.2",
     "pydantic>=2.6",
     "python-irodsclient>=2.0",

@@ -1,13 +1,20 @@
-"""``mesa-ducklake record`` command-line entry point.
+"""``mesa-ducklake`` command-line entry point.
 
-The CLI is the **only** sanctioned non-Python interface to
-mesa-ducklake. It exists primarily so iRODS rule-engine callbacks
-(``msiExecCmd`` or a fork+exec) can record AVU changes that were made
-through clients other than mesa-mcp. See
-``irods-rules/mesa_avu_change.re`` for the rule that drives it.
+Two verbs:
 
-Wire contract
--------------
+* ``record`` — the rule-engine callback path. Reads a single JSON
+  object from stdin describing one AVU change and records it. See
+  ``irods-rules/mesa_avu_change.re`` for the rule that drives it.
+* ``recover`` — drain the ``mesa.pending_pushes`` WAL. Used by ops on
+  service start or after an iRODS outage to re-push any in-flight
+  Parquet snapshots that didn't commit. Needs an iRODS session,
+  constructed from ``~/.irods/`` (or ``IRODS_ENVIRONMENT_FILE``).
+
+This CLI is the **only** sanctioned non-Python interface to
+mesa-ducklake. Everything else uses :class:`DuckLakeClient`.
+
+``record`` wire contract
+------------------------
 
 Input — single JSON object on stdin::
 
@@ -30,13 +37,22 @@ Output (on success) — single JSON object on stdout::
 
     {"snapshot_id": <int>, "parquet_file": "<path>"}
 
+``recover`` wire contract
+-------------------------
+
+No stdin. Optional flags consumed before the verb is parsed.
+
+Output (on success) — single JSON object on stdout summarising the
+counts: ``{"pushed": N, "committed": N, "failed": N, "orphaned": N,
+"missing_local": N}``.
+
 Exit codes
 ----------
 
-* ``0`` — change recorded
+* ``0`` — success (record committed, or recovery completed)
 * ``1`` — generic error (catalog/lake failure, malformed JSON, etc.)
-* ``2`` — path is not within any MESA-enabled project (the rule may
-  silently skip this one)
+* ``2`` — path is not within any MESA-enabled project (``record``
+  only; the rule may silently skip this one)
 * ``3`` — ``MESA_DUCKLAKE_DSN`` is unset
 """
 
@@ -121,14 +137,14 @@ def main(
     stdout = stdout if stdout is not None else sys.stdout
     stderr = stderr if stderr is not None else sys.stderr
 
-    # Subcommand routing — the only verb we ship is ``record``, but we
-    # parse it positionally so the entry point matches the documented
-    # ``mesa-ducklake record`` form.
+    # Subcommand routing. ``record`` is the default for back-compat
+    # with the iRODS rule callback that just runs ``mesa-ducklake``
+    # with no verb.
     if not argv:
         verb = "record"
     else:
         verb = argv[0]
-    if verb != "record":
+    if verb not in {"record", "recover"}:
         _stderr_json(
             stderr,
             {"code": "unknown_verb", "message": f"unknown verb {verb!r}"},
@@ -150,6 +166,9 @@ def main(
         )
         return 3
 
+    if verb == "recover":
+        return _recover(dsn, stdout, stderr)
+
     try:
         raw = stdin.read()
         if not raw.strip():
@@ -165,6 +184,52 @@ def main(
         return 1
 
     return _record(payload, dsn, stdout, stderr)
+
+
+def _recover(dsn: str, stdout: IO[str], stderr: IO[str]) -> int:
+    """Workhorse for the ``recover`` verb.
+
+    Opens an iRODS session from the standard env files (``~/.irods/``
+    by default; overridable via ``IRODS_ENVIRONMENT_FILE``), then
+    drains the WAL via :meth:`DuckLakeClient.recover_pending_pushes`.
+    """
+    from irods.session import iRODSSession
+
+    from mesa_ducklake.client import DuckLakeClient
+
+    env_file = os.environ.get(
+        "IRODS_ENVIRONMENT_FILE",
+        os.path.expanduser("~/.irods/irods_environment.json"),
+    )
+
+    try:
+        with iRODSSession(irods_env_file=env_file) as session:
+            with DuckLakeClient(
+                postgres_dsn=dsn, irods_session=session
+            ) as client:
+                summary = client.recover_pending_pushes()
+    except FileNotFoundError as exc:
+        _stderr_json(
+            stderr,
+            {
+                "code": "irods_env_missing",
+                "message": (
+                    f"iRODS environment file not readable ({exc}); "
+                    "set IRODS_ENVIRONMENT_FILE or run iinit"
+                ),
+            },
+        )
+        return 1
+    except Exception as exc:  # noqa: BLE001 - surface anything else uniformly
+        _stderr_json(
+            stderr,
+            {"code": "recover_failed", "message": str(exc)},
+        )
+        return 1
+
+    json.dump(summary, stdout)
+    stdout.write("\n")
+    return 0
 
 
 def _record(

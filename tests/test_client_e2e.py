@@ -38,11 +38,13 @@ def _change(
 def client(
     catalog_db: str,
     tmp_lake_root: Path,
-    dummy_irods_session: Any,
 ) -> DuckLakeClient:
+    # ``irods_session=None`` keeps these tests in local-only mode — the
+    # WAL + iRODS-push flow is exercised end-to-end in
+    # ``test_irods_sync.py`` with a properly mocked session.
     return DuckLakeClient(
         postgres_dsn=catalog_db,
-        irods_session=dummy_irods_session,
+        irods_session=None,
         lake_root_override=tmp_lake_root,
     )
 
