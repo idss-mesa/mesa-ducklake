@@ -1,0 +1,58 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mesa-ducklake"
+version = "0.1.0"
+description = "AVU metadata history library for MESA-enabled iRODS projects, backed by DuckDB's DuckLake."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [
+    { name = "CyVerse" },
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: BSD License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "duckdb>=1.1",
+    "psycopg[binary]>=3.2",
+    "pydantic>=2.6",
+    "python-irodsclient>=2.0",
+    "pytz",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "pytest-postgresql",
+    "ruff",
+    "mypy",
+]
+
+[project.scripts]
+mesa-ducklake = "mesa_ducklake.cli:_console_main"
+
+[project.urls]
+Homepage = "https://github.com/cyverse/mesa-ducklake"
+Repository = "https://github.com/cyverse/mesa-ducklake"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mesa_ducklake"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "B", "UP"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

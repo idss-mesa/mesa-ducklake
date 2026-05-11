@@ -1,0 +1,24 @@
+# mesa-ducklake — example configuration.
+#
+# mesa-ducklake itself is a Python library, imported in-process by its
+# primary consumer mesa-mcp. It does not run as a daemon and does not
+# read this file at import time. The file is provided as a hint to
+# tooling and to humans wiring the library up to a deployment.
+#
+# Consumers (e.g. mesa-mcp) typically have their own config layer and
+# pass the resolved DSN + iRODS session directly to
+# `DuckLakeClient(postgres_dsn=..., irods_session=...)`.
+
+# libpq-style DSN for the Postgres catalog database. The same Postgres
+# cluster can host the iRODS iCAT schema; mesa-ducklake only touches
+# the `mesa` schema.
+postgres_dsn: "postgresql://mesa:mesa@localhost:5432/mesa"
+
+# iRODS zone the projects this client manages live in. Used by tooling
+# to validate that an iRODS path being registered is in the expected
+# zone.
+irods_zone: "iplant"
+
+# Python logging level for mesa-ducklake's internal loggers.
+# One of: DEBUG, INFO, WARNING, ERROR.
+log_level: "INFO"
