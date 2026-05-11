@@ -11,6 +11,13 @@ an MCP server that exposes CyVerse Data Store operations plus OBO/OLS-driven
 metadata creation. Every AVU change made through `mesa-mcp` is mirrored into
 `mesa-ducklake`.
 
+When mesa-mcp is run in **local-install** or **VICE-app** mode (rather than
+the hosted-service mode), the DuckLake catalog is usually skipped — users
+leave `catalog_dsn` blank and AVU writes still succeed but are not
+recorded. See [mesa-mcp's vice-apps and local-install
+docs](https://github.com/cyverse/mesa-mcp/tree/main/docs/user) for those
+modes.
+
 ## Documentation
 
 Full documentation lives under [`docs/`](./docs/README.md), split into three

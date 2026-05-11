@@ -20,6 +20,12 @@ Start here:
 - **Operators** standing up a deployment — read
   [`deploy/postgres.md`](./deploy/postgres.md) first.
 
+When mesa-mcp is run in local-install or VICE-app mode, the DuckLake
+catalog is usually skipped (`catalog_dsn` left blank) and AVU writes
+succeed without being recorded. See [mesa-mcp's vice-apps and
+local-install docs](https://github.com/cyverse/mesa-mcp/tree/main/docs/user)
+for those modes.
+
 ## Table of contents
 
 ### User
