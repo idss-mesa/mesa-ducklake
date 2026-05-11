@@ -153,3 +153,44 @@ class Snapshot(BaseModel):
         ...,
         description="Path of the Parquet file (relative to the project's ducklake_path).",
     )
+
+
+PARQUET_FILE_PENDING = "pending"
+"""Sentinel value for ``Snapshot.parquet_file`` while the underlying
+Parquet write or iRODS push hasn't yet committed. ``DuckLakeClient``
+inserts the snapshot row with this value, performs the local write +
+iRODS push, then flips the column to the real relative filename. Reads
+filter rows with ``parquet_file = 'pending'`` so in-flight writes are
+invisible. See migration ``0002_pending_pushes.sql``."""
+
+
+class PendingPush(BaseModel):
+    """A row in ``mesa.pending_pushes`` — one in-flight Parquet upload.
+
+    Inserted by :class:`DuckLakeClient` before it begins the
+    ``LakeStore.write_changes`` + ``irods_sync.push`` sequence; deleted
+    after the catalog row's ``parquet_file`` is flipped to its real
+    filename. A surviving row after a crash signals "this snapshot
+    needs its Parquet pushed to iRODS"; the recovery task drains it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    snapshot_id: int = Field(..., description="Snapshot the push is for.")
+    local_path: str = Field(..., description="Absolute path in the local cache.")
+    irods_target: str = Field(
+        ...,
+        description="Absolute iRODS path the Parquet should land at.",
+    )
+    attempts: int = Field(
+        default=0,
+        description="Count of push attempts made so far (0 before any try).",
+    )
+    last_error: str | None = Field(
+        default=None,
+        description="Stringified exception from the most recent failed attempt, if any.",
+    )
+    created_at: datetime = Field(
+        default_factory=_utcnow,
+        description="When this row was inserted.",
+    )

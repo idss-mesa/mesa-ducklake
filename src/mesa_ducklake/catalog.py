@@ -20,7 +20,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 from mesa_ducklake.irods_path import ducklake_subpath
-from mesa_ducklake.models import Project, Snapshot
+from mesa_ducklake.models import PARQUET_FILE_PENDING, PendingPush, Project, Snapshot
 
 
 def _row_to_project(row: dict[str, Any]) -> Project:
@@ -44,6 +44,17 @@ def _row_to_snapshot(row: dict[str, Any]) -> Snapshot:
         parent_snapshot=row["parent_snapshot"],
         note=row["note"],
         parquet_file=row["parquet_file"],
+    )
+
+
+def _row_to_pending_push(row: dict[str, Any]) -> PendingPush:
+    return PendingPush(
+        snapshot_id=row["snapshot_id"],
+        local_path=row["local_path"],
+        irods_target=row["irods_target"],
+        attempts=row["attempts"],
+        last_error=row["last_error"],
+        created_at=row["created_at"],
     )
 
 
@@ -208,34 +219,67 @@ class CatalogStore:
                 (snapshot_id,),
             )
 
-    def latest_snapshot_id(self, project_id: UUID) -> int | None:
-        """Return the snapshot id with the largest ``snapshot_id`` for a project."""
+    def latest_snapshot_id(
+        self,
+        project_id: UUID,
+        *,
+        include_pending: bool = False,
+    ) -> int | None:
+        """Return the largest ``snapshot_id`` for a project.
+
+        By default skips rows whose ``parquet_file`` is the
+        ``PARQUET_FILE_PENDING`` sentinel — those snapshots are
+        in-flight and not yet durable. Callers building a parent
+        pointer for a new snapshot want the latest *committed* one,
+        which is the default. Set ``include_pending=True`` for
+        recovery / debug queries that need to see uncommitted rows.
+        """
+        clause = "" if include_pending else "AND parquet_file <> %s"
+        params: tuple[Any, ...] = (project_id,)
+        if not include_pending:
+            params = (project_id, PARQUET_FILE_PENDING)
         with self._conn.cursor() as cur:
             cur.execute(
-                """
+                f"""
                 SELECT snapshot_id
                 FROM mesa.snapshots
-                WHERE project_id = %s
+                WHERE project_id = %s {clause}
                 ORDER BY snapshot_id DESC
                 LIMIT 1
                 """,
-                (project_id,),
+                params,
             )
             row = cur.fetchone()
         return row[0] if row else None
 
-    def list_snapshots(self, project_id: UUID, limit: int = 100) -> list[Snapshot]:
+    def list_snapshots(
+        self,
+        project_id: UUID,
+        limit: int = 100,
+        *,
+        include_pending: bool = False,
+    ) -> list[Snapshot]:
+        """List a project's snapshots, newest first.
+
+        By default omits pending (in-flight) snapshots — see
+        :data:`mesa_ducklake.models.PARQUET_FILE_PENDING`. Pass
+        ``include_pending=True`` for recovery scans.
+        """
+        clause = "" if include_pending else "AND parquet_file <> %s"
+        params: tuple[Any, ...] = (project_id, limit)
+        if not include_pending:
+            params = (project_id, PARQUET_FILE_PENDING, limit)
         with self._conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
-                """
+                f"""
                 SELECT snapshot_id, project_id, ts, actor, parent_snapshot,
                        note, parquet_file
                 FROM mesa.snapshots
-                WHERE project_id = %s
+                WHERE project_id = %s {clause}
                 ORDER BY snapshot_id DESC
                 LIMIT %s
                 """,
-                (project_id, limit),
+                params,
             )
             rows = cur.fetchall()
         return [_row_to_snapshot(r) for r in rows]
@@ -263,6 +307,122 @@ class CatalogStore:
             )
             row = cur.fetchone()
         return row[0] if row else None
+
+    # ------------------------------------------------------------------ pending pushes
+
+    def insert_pending_push(
+        self,
+        snapshot_id: int,
+        local_path: str,
+        irods_target: str,
+    ) -> PendingPush:
+        """Insert a write-ahead row tracking an in-flight Parquet push.
+
+        Called by :class:`DuckLakeClient` just before it asks
+        :mod:`irods_sync` to push the Parquet file. The row survives
+        process crashes and gets drained by the recovery task on the
+        next start.
+
+        Idempotent on conflict: an existing row for the same
+        ``snapshot_id`` is left intact (we trust the queue, not the
+        new caller) and the existing row is returned. This makes the
+        write path safe to retry.
+        """
+        with self._conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                INSERT INTO mesa.pending_pushes
+                    (snapshot_id, local_path, irods_target)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (snapshot_id) DO NOTHING
+                RETURNING snapshot_id, local_path, irods_target,
+                          attempts, last_error, created_at
+                """,
+                (snapshot_id, local_path, irods_target),
+            )
+            row = cur.fetchone()
+            if row is None:
+                # Pre-existing row; return it as-is.
+                cur.execute(
+                    """
+                    SELECT snapshot_id, local_path, irods_target,
+                           attempts, last_error, created_at
+                    FROM mesa.pending_pushes
+                    WHERE snapshot_id = %s
+                    """,
+                    (snapshot_id,),
+                )
+                row = cur.fetchone()
+        assert row is not None  # snapshot_id must exist after INSERT-or-SELECT
+        return _row_to_pending_push(row)
+
+    def delete_pending_push(self, snapshot_id: int) -> None:
+        """Drop a pending-push row. Called after the catalog commit succeeds."""
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM mesa.pending_pushes WHERE snapshot_id = %s",
+                (snapshot_id,),
+            )
+
+    def bump_pending_push_attempt(
+        self,
+        snapshot_id: int,
+        error: str,
+        *,
+        error_max_chars: int = 2000,
+    ) -> PendingPush | None:
+        """Record one more failed push attempt against a pending row.
+
+        Returns the updated :class:`PendingPush`, or ``None`` if the
+        row no longer exists (e.g. another process drained the queue
+        between our last read and this update).
+        """
+        truncated = error[:error_max_chars] if error else error
+        with self._conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                UPDATE mesa.pending_pushes
+                SET attempts   = attempts + 1,
+                    last_error = %s
+                WHERE snapshot_id = %s
+                RETURNING snapshot_id, local_path, irods_target,
+                          attempts, last_error, created_at
+                """,
+                (truncated, snapshot_id),
+            )
+            row = cur.fetchone()
+        return _row_to_pending_push(row) if row else None
+
+    def list_pending_pushes(self, limit: int = 100) -> list[PendingPush]:
+        """List pending pushes, oldest first (drain order)."""
+        with self._conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                SELECT snapshot_id, local_path, irods_target,
+                       attempts, last_error, created_at
+                FROM mesa.pending_pushes
+                ORDER BY created_at ASC, snapshot_id ASC
+                LIMIT %s
+                """,
+                (limit,),
+            )
+            rows = cur.fetchall()
+        return [_row_to_pending_push(r) for r in rows]
+
+    def get_pending_push(self, snapshot_id: int) -> PendingPush | None:
+        """Return a single pending-push row by snapshot id, or ``None``."""
+        with self._conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                SELECT snapshot_id, local_path, irods_target,
+                       attempts, last_error, created_at
+                FROM mesa.pending_pushes
+                WHERE snapshot_id = %s
+                """,
+                (snapshot_id,),
+            )
+            row = cur.fetchone()
+        return _row_to_pending_push(row) if row else None
 
     # ------------------------------------------------------------------ lifecycle
 
