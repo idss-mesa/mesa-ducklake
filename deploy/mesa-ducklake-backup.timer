@@ -1,0 +1,25 @@
+[Unit]
+Description=mesa-ducklake — daily Postgres backup timer
+Documentation=file:///home/exouser/mesa-ducklake/docs/deploy/backup.md
+
+[Timer]
+# Daily at 03:00 UTC. Chosen because mesa-mcp's nightly traffic is
+# lower then; bumping it earlier collides with the European morning
+# Claude.ai connector tests, later collides with US-Pacific evening
+# usage. Operators may override via ``systemctl edit``.
+OnCalendar=*-*-* 03:00:00 UTC
+
+# If the machine was off when the timer was due, run as soon as it
+# comes back up rather than waiting for tomorrow. Catalog backups
+# missing a day is a soft regression; making it up matters more than
+# preserving the exact 03:00 schedule.
+Persistent=true
+
+# Avoid every node in a hypothetical multi-host deployment hitting
+# iRODS at exactly the same second.
+RandomizedDelaySec=15min
+
+Unit=mesa-ducklake-backup.service
+
+[Install]
+WantedBy=timers.target

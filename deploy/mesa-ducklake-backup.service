@@ -1,0 +1,47 @@
+[Unit]
+Description=mesa-ducklake — daily Postgres catalog backup to iRODS
+Documentation=file:///home/exouser/mesa-ducklake/docs/deploy/backup.md
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+
+# Runs as the iRODS-authenticated service user so ~/.irods/.irodsA is
+# available for ``iput``. Matches the user that owns mesa-mcp.service.
+User=exouser
+Group=exouser
+
+# ``backup-pg.sh`` reads PGPASSWORD from /etc/mesa-mcp/secrets/postgres_password
+# and resolves ~/.irods/ from the home directory, so no extra env wiring
+# is needed here. Operators override defaults via ``systemctl edit`` if
+# they need to point at a different host / database / retention.
+ExecStart=/home/exouser/mesa-ducklake/deploy/backup-pg.sh
+
+# Allow up to 10 minutes for a dump+upload. Bigger catalogs may need
+# more; raise via ``systemctl edit`` rather than editing this file.
+TimeoutStartSec=600
+
+# Tag journal entries so ``journalctl -u mesa-ducklake-backup`` is
+# greppable from a glance.
+SyslogIdentifier=mesa-ducklake-backup
+
+# Security hardening — script writes one temp file under /tmp (managed
+# by mktemp) and otherwise reads /etc/mesa-mcp/secrets/ + invokes
+# iCommands. No broader filesystem access needed.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/tmp
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+ProtectClock=yes
+ProtectHostname=yes
+
+[Install]
+WantedBy=multi-user.target

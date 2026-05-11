@@ -54,6 +54,8 @@ for those modes.
 
 - [Postgres](./deploy/postgres.md) — Ubuntu 24.04 provisioning of the
   catalog database.
+- [Backup](./deploy/backup.md) — daily ``pg_dump`` to iRODS and the
+  recovery procedure that goes with it.
 - [iRODS rules](./deploy/irods-rules.md) — installing the rule
   callbacks on an iRODS server (in progress).
 - [Per-project storage](./deploy/per-project-storage.md) —
