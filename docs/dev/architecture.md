@@ -185,6 +185,92 @@ files directly. Adopting DuckLake's snapshot-aware reads is an open
 design item; the public API is shaped so that change is invisible
 to callers.
 
+## iRODS sync sidecar
+
+DuckDB requires real filesystem paths for both `COPY (...) TO '...'`
+and `read_parquet([...])` — no bytes-stream interface lets us point
+it at an iRODS data object directly. So we use a **sidecar** pattern
+instead of replacing `LocalLakeStorage` with an iRODS-backed
+implementation:
+
+* `LocalLakeStorage` continues to write/read Parquet on local disk.
+* The local directory is now a **cache** under
+  `platformdirs.user_cache_dir("mesa-ducklake")/<project_id>/`, not
+  the project's iRODS path.
+* `mesa_ducklake.irods_sync` replicates each Parquet file into
+  `<project.ducklake_path>/snapshot_<id>.parquet` after the local
+  write succeeds, with checksum verification.
+* Reads call `irods_sync.ensure_cached` before opening DuckDB, which
+  pulls any expected Parquet files missing from the local cache
+  from iRODS.
+
+### Write protocol (push-before-commit)
+
+```
+DuckLakeClient.record_changes:
+    1. create_snapshot(parquet_file='pending')      -- hidden from reads
+    2. insert_pending_push(snapshot_id, local, irods) -- WAL row
+    3. LakeStore.write_changes(...)                 -- local Parquet
+    4. irods_sync.push(local, irods, session=...)   -- iRODS replicate + checksum
+    5. update_snapshot_parquet_file(real_name)      -- COMMIT POINT
+    6. delete_pending_push(snapshot_id)             -- drain WAL
+    7. cache.evict_if_over(cache_root, cap)         -- LRU trim
+```
+
+`list_snapshots` / `latest_snapshot_id` filter `parquet_file =
+'pending'` by default, so reads never see a half-committed snapshot.
+Pass `include_pending=True` for recovery / debug queries.
+
+### Crash recovery
+
+Any exception between steps 2 and 6 leaves the catalog row pending
+and the WAL row in place. `DuckLakeClient.recover_pending_pushes` (or
+the `mesa-ducklake recover` CLI) drains the queue:
+
+* **Catalog row already committed** — drop the WAL row.
+* **Snapshot row gone** (rare; `ON DELETE CASCADE` usually handles
+  it) — drop the orphan WAL row.
+* **Attempts ≥ `DEFAULT_MAX_ATTEMPTS`** — mark the catalog row
+  `parquet_file='failed'` so it stays invisible to reads, drop the
+  WAL row. Operators inspect via
+  `list_snapshots(include_pending=True)`.
+* **Local file missing** — bump attempts; future retries may recover
+  if the cache repopulates, otherwise the attempt cap eventually
+  marks it failed.
+* **Retry** — re-push to iRODS (idempotent via
+  `data_objects.put(..., force=True)` + deterministic Parquet output
+  from the `ORDER BY` in `lake.py`), commit the catalog row, drop
+  the WAL row.
+
+### Local cache
+
+Default location resolves via `platformdirs.user_cache_dir
+("mesa-ducklake")`:
+
+| Platform                                | Path                                                          |
+| --------------------------------------- | ------------------------------------------------------------- |
+| Linux (XDG)                             | `$XDG_CACHE_HOME/mesa-ducklake` or `~/.cache/mesa-ducklake`   |
+| Linux (systemd `CacheDirectory=`)       | the directory systemd creates and exports                     |
+| macOS                                   | `~/Library/Caches/mesa-ducklake`                              |
+
+Override at construction (`cache_dir=` / `cache_cap_bytes=`) or via
+mesa-mcp's `Config.ducklake.{cache_dir,cache_cap_bytes}` YAML/env.
+
+After every successful commit, `cache.evict_if_over` walks the cache
+root oldest-first by `st_mtime` and unlinks files until the total is
+back under `cache_cap_bytes` (default 1 GiB; `0` disables). Eviction
+runs on writes only — reads populate the cache via `ensure_cached`,
+and we want recently-read snapshots to stay hot.
+
+### Local-only mode
+
+`DuckLakeClient(irods_session=None)` *and* no per-call `session=...`
+disables the iRODS push entirely. Writes follow the pre-sync
+"delete on failure" rollback, the WAL stays untouched, and the cache
+*is* the durable store. Used by mesa-mcp's local-install and VICE-app
+modes (catalog DSN unset) and by tests in `tests/test_client_e2e.py`
+that exercise catalog + lake without iRODS.
+
 ## See also
 
 - [`schema.md`](./schema.md) — the column-by-column reference for
@@ -192,5 +278,9 @@ to callers.
 - [`queries.md`](./queries.md) — the canonical query templates.
 - [`adding-migrations.md`](./adding-migrations.md) — how the
   catalog evolves over time.
+- [`../deploy/backup.md`](../deploy/backup.md) — daily `pg_dump` to
+  iRODS for catalog durability.
+- [`../user/cli.md`](../user/cli.md) — the `mesa-ducklake recover`
+  CLI that drains the WAL on demand.
 - [`../../CLAUDE.md`](../../CLAUDE.md) — full architecture
   rationale.

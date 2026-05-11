@@ -315,16 +315,36 @@ non-obvious changes:
 
 ## Working with this repo
 
-- The repo is empty today (LICENSE + .gitignore + README only). The
-  first PR should bootstrap `pyproject.toml`, the package skeleton, the
-  `0001_initial.sql` migration, and a `DuckLakeClient` whose methods
-  raise `NotImplementedError` — proving the import surface and test
-  harness before any DuckDB code lands.
+- The package is built out: `CatalogStore`, `LakeStore` (with
+  `LocalLakeStorage`), the full `DuckLakeClient` API, the
+  `mesa-ducklake record`/`recover` CLI, the iRODS sync sidecar, and
+  the daily `pg_dump`-to-iRODS backup pipeline all exist. Tests cover
+  catalog (unit + ephemeral Postgres), lake (DuckDB I/O), iRODS sync
+  (PRC-mocked), cache eviction, and the CLI.
+- The write path is push-before-commit: `create_snapshot
+  (parquet_file='pending')` → `insert_pending_push` → write Parquet
+  locally → push to iRODS (with checksum verify) →
+  `update_snapshot_parquet_file(real_name)` (commit) →
+  `delete_pending_push`. Reads filter the `'pending'` sentinel so
+  in-flight writes are invisible.
+- A `mesa.pending_pushes` WAL row covers crash recovery. `mesa-ducklake
+  recover` (or `DuckLakeClient.recover_pending_pushes(session=...)`)
+  drains it: re-push to iRODS if absent, flip catalog row, delete WAL.
+  After `DEFAULT_MAX_ATTEMPTS` failures the catalog row is marked
+  `parquet_file='failed'` and stays invisible to normal reads.
+- Local Parquet lives in a *cache* directory (default
+  `platformdirs.user_cache_dir("mesa-ducklake")`). It's rebuildable
+  from iRODS; an LRU-by-mtime eviction trims it at the end of each
+  successful commit.
 - Schema changes are migrations, never in-place edits. Numbered files
   in `migrations/`. The migration runner is the only thing that
   touches the live Postgres schema.
 - When adding a new column to `avu_changes`, **also** write a small
   doc note explaining why the AVU triple shape isn't enough — that
   shape is a hard contract with iRODS.
+- Still ahead (intentionally deferred): iRODS rule callbacks deployed
+  on production iRODS (so `imeta` writes reach the history), snapshot
+  compaction (per-project parquet consolidation), and Postgres
+  WAL-shipping to iRODS for sub-minute catalog RPO.
 - For non-trivial design work (new query patterns, schema changes,
   snapshot semantics), invoke the `ducklake-engineer` sub-agent.

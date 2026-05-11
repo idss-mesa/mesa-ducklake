@@ -34,6 +34,8 @@ audiences:
   [`docs/dev/queries.md`](./docs/dev/queries.md), and
   [`docs/dev/contributing.md`](./docs/dev/contributing.md).
 - **Operators** — [`docs/deploy/postgres.md`](./docs/deploy/postgres.md),
+  [`docs/deploy/backup.md`](./docs/deploy/backup.md) for the daily
+  ``pg_dump`` to iRODS and recovery procedure,
   [`docs/deploy/irods-rules.md`](./docs/deploy/irods-rules.md), and
   [`docs/deploy/per-project-storage.md`](./docs/deploy/per-project-storage.md).
 
@@ -72,8 +74,21 @@ ruff check src/ tests/
 
 ## Status
 
-Scaffold only — the public methods raise `NotImplementedError`. DuckDB writes,
-Parquet I/O, and real time-travel queries land in follow-up PRs.
+Pre-alpha but functional. The `DuckLakeClient` API is implemented:
+project register / find, `record_changes`, time-travel reads
+(`get_avus`, `get_avus_as_of`, `get_history`), snapshot diff,
+recovery (`recover_pending_pushes`). The iRODS sync sidecar replicates
+each Parquet snapshot into the project's `/.mesa/ducklake/` collection
+with checksum verification and a Postgres-side WAL for crash recovery.
+The local Parquet cache lives under `platformdirs.user_cache_dir
+("mesa-ducklake")` by default, bounded by an LRU-by-mtime eviction
+policy. See [`docs/dev/architecture.md`](./docs/dev/architecture.md)
+for the write/read protocols.
+
+Still ahead: iRODS rule callbacks deployed on a production server (so
+non-mesa-mcp writes like `imeta` reach the history), snapshot
+compaction, and a separate WAL-shipping path for sub-minute RPO on
+the catalog backup.
 
 ## Project guide
 
