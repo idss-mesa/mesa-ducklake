@@ -120,6 +120,7 @@ class DuckDBCatalogStore:
         self._conn = duckdb.connect(self._path)
         for stmt in _SCHEMA_STATEMENTS:
             self._conn.execute(stmt)
+        self._closed = False
 
     # ------------------------------------------------------------------ helpers
     def _one(self, sql: str, params: list[Any]) -> dict[str, Any] | None:
@@ -306,4 +307,6 @@ class DuckDBCatalogStore:
 
     # ------------------------------------------------------------------ lifecycle
     def close(self) -> None:
-        self._conn.close()
+        if not self._closed:
+            self._conn.close()
+            self._closed = True

@@ -465,5 +465,6 @@ def open_catalog(dsn: str) -> CatalogStore:
     if s == ":memory:" or s.endswith(".duckdb"):
         return DuckDBCatalogStore(s)
     raise ValueError(
-        f"unrecognized catalog DSN (expected postgresql:// or duckdb://…/*.duckdb): {dsn!r}"
+        f"unrecognized catalog DSN"
+        f" (expected postgresql://, duckdb://…, *.duckdb, or :memory:): {dsn!r}"
     )

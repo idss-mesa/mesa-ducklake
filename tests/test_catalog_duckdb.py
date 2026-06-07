@@ -168,3 +168,9 @@ def test_memory_backend_constructs():
         assert s.get_project(proj.project_id) is not None
     finally:
         s.close()
+
+
+def test_close_is_idempotent(tmp_path):
+    s = DuckDBCatalogStore(str(tmp_path / "idem.duckdb"))
+    s.close()
+    s.close()  # second close must not raise
