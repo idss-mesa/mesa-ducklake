@@ -109,7 +109,11 @@ method surface as Postgres. DuckDB-dialect notes:
   version, else a pre-check `SELECT`).
 - **FK constraints omitted** in the DuckDB schema (DuckDB self-referencing FKs
   are limited); integrity is app-enforced exactly as the write protocol already
-  does. A one-row `mesa.schema_versions` marker is inserted for parity/observability.
+  does. `delete_snapshot` deletes the matching `pending_pushes` child explicitly to
+  mirror the Postgres `ON DELETE CASCADE`. The schema is bootstrapped inline and
+  idempotently (`CREATE … IF NOT EXISTS`); a versioned migration runner for the
+  DuckDB dialect is deferred (see Future work) — no `schema_versions` table is
+  created in this iteration.
 - Row→model: a small `_dicts(cur)` helper zips `cur.description` with each tuple
   so the existing `_row_to_project/_row_to_snapshot/_row_to_pending_push`
   converters are reused.
