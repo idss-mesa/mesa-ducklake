@@ -47,7 +47,7 @@ from typing import TYPE_CHECKING, Any
 from mesa_ducklake.models import PARQUET_FILE_PENDING
 
 if TYPE_CHECKING:
-    from mesa_ducklake.catalog import PostgresCatalogStore
+    from mesa_ducklake.catalog_base import CatalogStore
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +58,7 @@ DEFAULT_MAX_ATTEMPTS = 5
 
 # Sentinel written into ``mesa.snapshots.parquet_file`` when recovery
 # has given up on a snapshot. Operators inspect via
-# ``PostgresCatalogStore.list_snapshots(include_pending=True)``.
+# ``CatalogStore.list_snapshots(include_pending=True)``.
 PARQUET_FILE_FAILED = "failed"
 
 # How big a read chunk to use when hashing a local Parquet for
@@ -288,7 +288,7 @@ def ensure_cached(
 
 
 def recover_pending_pushes(
-    catalog: "PostgresCatalogStore",
+    catalog: "CatalogStore",
     session: Any,
     *,
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,

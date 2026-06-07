@@ -5,8 +5,8 @@ modules (``catalog``, ``lake``, ``queries``, ``time_travel``,
 ``schema``, ``irods_sync``, ``cache``) are internal and may be
 reorganized without notice.
 
-The client composes a :class:`PostgresCatalogStore` (Postgres index of
-projects + snapshots) with one or more :class:`LakeStore` instances
+The client composes a catalog backend (Postgres or DuckDB, selected by
+the ``catalog_dsn`` scheme) with one or more :class:`LakeStore` instances
 (one DuckDB/Parquet directory per project) and a
 :mod:`mesa_ducklake.irods_sync` sidecar that replicates Parquet
 files into each project's iRODS ``/.mesa/ducklake/`` collection.
@@ -46,7 +46,8 @@ from platformdirs import user_cache_dir
 
 from mesa_ducklake import cache
 from mesa_ducklake import irods_sync
-from mesa_ducklake.catalog import PostgresCatalogStore
+from mesa_ducklake.catalog import open_catalog
+from mesa_ducklake.catalog_base import CatalogStore
 from mesa_ducklake.lake import LakeStore
 from mesa_ducklake.models import AvuChange, PARQUET_FILE_PENDING, Project, Snapshot
 from mesa_ducklake.time_travel import parse_as_of
@@ -75,8 +76,15 @@ class DuckLakeClient:
 
     Parameters
     ----------
+    catalog_dsn:
+        DSN for the catalog backend. Use ``postgresql://…`` for a Postgres
+        catalog or ``duckdb:///path/to/file.duckdb`` for a local DuckDB
+        catalog. The backend is selected automatically by
+        :func:`mesa_ducklake.catalog.open_catalog`.
     postgres_dsn:
-        Standard libpq DSN for the catalog database.
+        Deprecated alias for ``catalog_dsn``, kept for back-compat.
+        When both are supplied, ``catalog_dsn`` wins. Prefer ``catalog_dsn``
+        for new code.
     irods_session:
         Authenticated ``python-irodsclient`` session, or ``None`` for
         local-only mode (iRODS push/pull skipped). Typed as ``Any``
@@ -99,14 +107,21 @@ class DuckLakeClient:
 
     def __init__(
         self,
-        postgres_dsn: str,
+        catalog_dsn: str | None = None,
         irods_session: Any = None,
         *,
+        postgres_dsn: str | None = None,
         cache_dir: str | Path | None = None,
         cache_cap_bytes: int = DEFAULT_CACHE_CAP_BYTES,
         lake_root_override: str | Path | None = None,
     ) -> None:
-        self._postgres_dsn = postgres_dsn
+        dsn = catalog_dsn if catalog_dsn is not None else postgres_dsn
+        if dsn is None:
+            raise TypeError(
+                "DuckLakeClient requires catalog_dsn (or the legacy postgres_dsn alias)"
+            )
+        self._catalog_dsn = dsn
+        self._postgres_dsn = dsn  # back-compat attribute for any external readers
         self._irods_session = irods_session
 
         # Back-compat: lake_root_override is the historical name; new
@@ -122,15 +137,15 @@ class DuckLakeClient:
 
         # Lazily-constructed so smoke tests that only check construction
         # don't need a live Postgres.
-        self._catalog: PostgresCatalogStore | None = None
+        self._catalog: CatalogStore | None = None
         # One LakeStore per project_id.
         self._lakes: dict[UUID, LakeStore] = {}
 
     # ------------------------------------------------------------------ internal helpers
 
-    def _get_catalog(self) -> PostgresCatalogStore:
+    def _get_catalog(self) -> CatalogStore:
         if self._catalog is None:
-            self._catalog = PostgresCatalogStore(self._postgres_dsn)
+            self._catalog = open_catalog(self._catalog_dsn)
         return self._catalog
 
     def _resolve_lake_root(self, project: Project) -> Path:
