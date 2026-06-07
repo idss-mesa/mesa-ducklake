@@ -170,6 +170,82 @@ class DuckDBCatalogStore:
         )
         return _row_to_project(d) if d else None
 
+    # ------------------------------------------------------------------ snapshots
+    def create_snapshot(self, project_id, actor, parent_snapshot, note, parquet_file) -> Snapshot:
+        d = self._one(
+            """
+            INSERT INTO mesa.snapshots
+                (project_id, actor, parent_snapshot, note, parquet_file)
+            VALUES (?, ?, ?, ?, ?)
+            RETURNING snapshot_id, project_id, ts, actor, parent_snapshot,
+                      note, parquet_file
+            """,
+            [str(project_id), actor, parent_snapshot, note, parquet_file],
+        )
+        assert d is not None
+        return _row_to_snapshot(d)
+
+    def update_snapshot_parquet_file(self, snapshot_id, parquet_file) -> Snapshot:
+        d = self._one(
+            """UPDATE mesa.snapshots SET parquet_file = ? WHERE snapshot_id = ?
+               RETURNING snapshot_id, project_id, ts, actor, parent_snapshot,
+                         note, parquet_file""",
+            [parquet_file, snapshot_id],
+        )
+        if d is None:
+            raise KeyError(f"snapshot {snapshot_id} not found")
+        return _row_to_snapshot(d)
+
+    def delete_snapshot(self, snapshot_id) -> None:
+        self._conn.execute("DELETE FROM mesa.snapshots WHERE snapshot_id = ?", [snapshot_id])
+
+    def latest_snapshot_id(self, project_id, *, include_pending=False) -> int | None:
+        if include_pending:
+            d = self._one(
+                "SELECT snapshot_id FROM mesa.snapshots WHERE project_id = ? "
+                "ORDER BY snapshot_id DESC LIMIT 1",
+                [str(project_id)],
+            )
+        else:
+            d = self._one(
+                "SELECT snapshot_id FROM mesa.snapshots WHERE project_id = ? "
+                "AND parquet_file <> ? ORDER BY snapshot_id DESC LIMIT 1",
+                [str(project_id), PARQUET_FILE_PENDING],
+            )
+        return d["snapshot_id"] if d else None
+
+    def list_snapshots(self, project_id, limit=100, *, include_pending=False) -> list[Snapshot]:
+        if include_pending:
+            rows = self._all(
+                """SELECT snapshot_id, project_id, ts, actor, parent_snapshot,
+                          note, parquet_file
+                   FROM mesa.snapshots WHERE project_id = ?
+                   ORDER BY snapshot_id DESC LIMIT ?""",
+                [str(project_id), limit],
+            )
+        else:
+            rows = self._all(
+                """SELECT snapshot_id, project_id, ts, actor, parent_snapshot,
+                          note, parquet_file
+                   FROM mesa.snapshots WHERE project_id = ? AND parquet_file <> ?
+                   ORDER BY snapshot_id DESC LIMIT ?""",
+                [str(project_id), PARQUET_FILE_PENDING, limit],
+            )
+        return [_row_to_snapshot(d) for d in rows]
+
+    def get_snapshot(self, snapshot_id) -> Snapshot | None:
+        d = self._one(
+            """SELECT snapshot_id, project_id, ts, actor, parent_snapshot,
+                      note, parquet_file
+               FROM mesa.snapshots WHERE snapshot_id = ?""",
+            [snapshot_id],
+        )
+        return _row_to_snapshot(d) if d else None
+
+    def snapshot_ts(self, snapshot_id) -> datetime | None:
+        d = self._one("SELECT ts FROM mesa.snapshots WHERE snapshot_id = ?", [snapshot_id])
+        return d["ts"] if d else None
+
     # ------------------------------------------------------------------ lifecycle
     def close(self) -> None:
         self._conn.close()

@@ -41,3 +41,53 @@ def test_duplicate_path_rejected(store):
     store.register_project("/iplant/home/u/proj", "iplant", None, "u")
     with pytest.raises(duckdb.ConstraintException):
         store.register_project("/iplant/home/u/proj", "iplant", None, "u")
+
+
+# ------------------------------------------------------------------ snapshots
+
+from mesa_ducklake.models import PARQUET_FILE_PENDING
+
+
+def _project(store):
+    return store.register_project("/iplant/home/u/proj", "iplant", None, "u")
+
+
+def test_snapshot_chain_and_latest(store):
+    p = _project(store)
+    s1 = store.create_snapshot(p.project_id, "u", None, "first", "snapshot_1.parquet")
+    s2 = store.create_snapshot(p.project_id, "u", s1.snapshot_id, "second", "snapshot_2.parquet")
+    assert s2.snapshot_id > s1.snapshot_id
+    assert s2.parent_snapshot == s1.snapshot_id
+    assert store.latest_snapshot_id(p.project_id) == s2.snapshot_id
+    assert store.get_snapshot(s1.snapshot_id).note == "first"
+    assert store.snapshot_ts(s2.snapshot_id) is not None
+
+
+def test_latest_skips_pending(store):
+    p = _project(store)
+    committed = store.create_snapshot(p.project_id, "u", None, None, "snapshot_1.parquet")
+    store.create_snapshot(p.project_id, "u", committed.snapshot_id, None, PARQUET_FILE_PENDING)
+    # default excludes pending; include_pending sees the newer pending row
+    assert store.latest_snapshot_id(p.project_id) == committed.snapshot_id
+    assert store.latest_snapshot_id(p.project_id, include_pending=True) > committed.snapshot_id
+
+
+def test_update_parquet_file_and_list(store):
+    p = _project(store)
+    s = store.create_snapshot(p.project_id, "u", None, None, PARQUET_FILE_PENDING)
+    updated = store.update_snapshot_parquet_file(s.snapshot_id, "snapshot_1.parquet")
+    assert updated.parquet_file == "snapshot_1.parquet"
+    listed = store.list_snapshots(p.project_id)
+    assert [x.snapshot_id for x in listed] == [s.snapshot_id]
+
+
+def test_update_missing_snapshot_raises(store):
+    with pytest.raises(KeyError):
+        store.update_snapshot_parquet_file(999999, "x.parquet")
+
+
+def test_delete_snapshot(store):
+    p = _project(store)
+    s = store.create_snapshot(p.project_id, "u", None, None, "snapshot_1.parquet")
+    store.delete_snapshot(s.snapshot_id)
+    assert store.get_snapshot(s.snapshot_id) is None
