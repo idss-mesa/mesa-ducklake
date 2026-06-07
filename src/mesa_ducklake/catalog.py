@@ -19,6 +19,8 @@ from uuid import UUID
 import psycopg
 from psycopg.rows import dict_row
 
+from mesa_ducklake.catalog_base import CatalogStore
+from mesa_ducklake.catalog_duckdb import DuckDBCatalogStore
 from mesa_ducklake.irods_path import ducklake_subpath
 from mesa_ducklake.models import PARQUET_FILE_PENDING, PendingPush, Project, Snapshot
 
@@ -429,3 +431,39 @@ class PostgresCatalogStore:
     def close(self) -> None:
         if self._owns_conn and not self._conn.closed:
             self._conn.close()
+
+
+def _duckdb_uri_to_path(uri: str) -> str:
+    """Map a ``duckdb://`` URI to a filesystem path (or ``:memory:``)."""
+    rest = uri[len("duckdb://"):]
+    if rest in (":memory:", "/:memory:"):
+        return ":memory:"
+    return rest  # 'duckdb:///abs/p.duckdb' -> '/abs/p.duckdb'
+
+
+def open_catalog(dsn: str) -> CatalogStore:
+    """Construct the catalog backend implied by ``dsn``.
+
+    * ``postgresql://`` / ``postgres://`` (or a libpq keyword DSN) ->
+      :class:`PostgresCatalogStore`
+    * ``duckdb://…`` URI, a path ending ``.duckdb``, or ``:memory:`` ->
+      :class:`DuckDBCatalogStore`
+    * blank / unrecognized -> ``ValueError``
+
+    Callers that treat a blank DSN as "DuckLake disabled" must gate on that
+    before calling — this factory raises on blank.
+    """
+    if dsn is None or not str(dsn).strip():
+        raise ValueError("open_catalog requires a non-empty catalog DSN")
+    s = str(dsn).strip()
+    if s.startswith(("postgresql://", "postgres://")) or (
+        "://" not in s and ("dbname=" in s or "host=" in s)
+    ):
+        return PostgresCatalogStore(s)
+    if s.startswith("duckdb://"):
+        return DuckDBCatalogStore(_duckdb_uri_to_path(s))
+    if s == ":memory:" or s.endswith(".duckdb"):
+        return DuckDBCatalogStore(s)
+    raise ValueError(
+        f"unrecognized catalog DSN (expected postgresql:// or duckdb://…/*.duckdb): {dsn!r}"
+    )
