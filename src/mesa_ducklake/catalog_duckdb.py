@@ -15,9 +15,10 @@ Pydantic coerces the string back to ``uuid.UUID`` on the way out.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 from uuid import uuid4
 
 import duckdb
@@ -69,7 +70,7 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
 def _to_dict(description: Sequence[Any], row: tuple | None) -> dict[str, Any] | None:
     if row is None:
         return None
-    return {col[0]: val for col, val in zip(description, row)}
+    return {col[0]: val for col, val in zip(description, row, strict=True)}
 
 
 def _row_to_project(d: dict[str, Any]) -> Project:
@@ -270,7 +271,9 @@ class DuckDBCatalogStore:
     def delete_pending_push(self, snapshot_id) -> None:
         self._conn.execute("DELETE FROM mesa.pending_pushes WHERE snapshot_id = ?", [snapshot_id])
 
-    def bump_pending_push_attempt(self, snapshot_id, error, *, error_max_chars=2000) -> PendingPush | None:
+    def bump_pending_push_attempt(
+        self, snapshot_id, error, *, error_max_chars=2000
+    ) -> PendingPush | None:
         truncated = error[:error_max_chars] if error else error
         d = self._one(
             """UPDATE mesa.pending_pushes

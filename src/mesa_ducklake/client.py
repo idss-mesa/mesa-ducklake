@@ -44,12 +44,11 @@ from uuid import UUID
 
 from platformdirs import user_cache_dir
 
-from mesa_ducklake import cache
-from mesa_ducklake import irods_sync
+from mesa_ducklake import cache, irods_sync
 from mesa_ducklake.catalog import open_catalog
 from mesa_ducklake.catalog_base import CatalogStore
 from mesa_ducklake.lake import LakeStore
-from mesa_ducklake.models import AvuChange, PARQUET_FILE_PENDING, Project, Snapshot
+from mesa_ducklake.models import PARQUET_FILE_PENDING, AvuChange, Project, Snapshot
 from mesa_ducklake.time_travel import parse_as_of
 
 logger = logging.getLogger(__name__)

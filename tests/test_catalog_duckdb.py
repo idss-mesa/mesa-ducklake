@@ -4,6 +4,7 @@ import duckdb
 import pytest
 
 from mesa_ducklake.catalog_duckdb import DuckDBCatalogStore
+from mesa_ducklake.models import PARQUET_FILE_PENDING
 
 
 @pytest.fixture
@@ -44,8 +45,6 @@ def test_duplicate_path_rejected(store):
 
 
 # ------------------------------------------------------------------ snapshots
-
-from mesa_ducklake.models import PARQUET_FILE_PENDING
 
 
 def _project(store):
@@ -98,7 +97,9 @@ def test_delete_snapshot(store):
 def test_pending_push_insert_idempotent(store):
     p = _project(store)
     s = store.create_snapshot(p.project_id, "u", None, None, PARQUET_FILE_PENDING)
-    first = store.insert_pending_push(s.snapshot_id, "/local/snapshot_1.parquet", "/irods/snapshot_1.parquet")
+    first = store.insert_pending_push(
+        s.snapshot_id, "/local/snapshot_1.parquet", "/irods/snapshot_1.parquet"
+    )
     again = store.insert_pending_push(s.snapshot_id, "/DIFFERENT", "/DIFFERENT")
     assert first.snapshot_id == again.snapshot_id
     # idempotent: original row wins, not the second caller's values

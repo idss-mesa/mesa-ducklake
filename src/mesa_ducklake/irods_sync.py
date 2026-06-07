@@ -288,7 +288,7 @@ def ensure_cached(
 
 
 def recover_pending_pushes(
-    catalog: "CatalogStore",
+    catalog: CatalogStore,
     session: Any,
     *,
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,

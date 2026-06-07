@@ -33,7 +33,6 @@ from mesa_ducklake.irods_sync import (
 )
 from mesa_ducklake.models import PARQUET_FILE_PENDING
 
-
 # ---------------------------------------------------------------------------
 # Mock helpers
 # ---------------------------------------------------------------------------
