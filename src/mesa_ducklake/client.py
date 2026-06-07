@@ -5,7 +5,7 @@ modules (``catalog``, ``lake``, ``queries``, ``time_travel``,
 ``schema``, ``irods_sync``, ``cache``) are internal and may be
 reorganized without notice.
 
-The client composes a :class:`CatalogStore` (Postgres index of
+The client composes a :class:`PostgresCatalogStore` (Postgres index of
 projects + snapshots) with one or more :class:`LakeStore` instances
 (one DuckDB/Parquet directory per project) and a
 :mod:`mesa_ducklake.irods_sync` sidecar that replicates Parquet
@@ -46,7 +46,7 @@ from platformdirs import user_cache_dir
 
 from mesa_ducklake import cache
 from mesa_ducklake import irods_sync
-from mesa_ducklake.catalog import CatalogStore
+from mesa_ducklake.catalog import PostgresCatalogStore
 from mesa_ducklake.lake import LakeStore
 from mesa_ducklake.models import AvuChange, PARQUET_FILE_PENDING, Project, Snapshot
 from mesa_ducklake.time_travel import parse_as_of
@@ -122,15 +122,15 @@ class DuckLakeClient:
 
         # Lazily-constructed so smoke tests that only check construction
         # don't need a live Postgres.
-        self._catalog: CatalogStore | None = None
+        self._catalog: PostgresCatalogStore | None = None
         # One LakeStore per project_id.
         self._lakes: dict[UUID, LakeStore] = {}
 
     # ------------------------------------------------------------------ internal helpers
 
-    def _get_catalog(self) -> CatalogStore:
+    def _get_catalog(self) -> PostgresCatalogStore:
         if self._catalog is None:
-            self._catalog = CatalogStore(self._postgres_dsn)
+            self._catalog = PostgresCatalogStore(self._postgres_dsn)
         return self._catalog
 
     def _resolve_lake_root(self, project: Project) -> Path:

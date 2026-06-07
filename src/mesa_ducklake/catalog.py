@@ -58,7 +58,7 @@ def _row_to_pending_push(row: dict[str, Any]) -> PendingPush:
     )
 
 
-class CatalogStore:
+class PostgresCatalogStore:
     """Internal CRUD layer over the Postgres ``mesa`` schema.
 
     Parameters

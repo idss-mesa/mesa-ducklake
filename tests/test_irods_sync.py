@@ -20,7 +20,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from mesa_ducklake import AvuChange, DuckLakeClient
-from mesa_ducklake.catalog import CatalogStore
+from mesa_ducklake.catalog import PostgresCatalogStore
 from mesa_ducklake.irods_sync import (
     DEFAULT_MAX_ATTEMPTS,
     PARQUET_FILE_FAILED,
@@ -254,7 +254,7 @@ pytestmark_pg = pytest.mark.requires_postgres
 @pytest.mark.requires_postgres
 def test_recover_drains_committed_rows(catalog_db: str, tmp_path: Path) -> None:
     """Snapshot already committed — drop the WAL row."""
-    catalog = CatalogStore(catalog_db)
+    catalog = PostgresCatalogStore(catalog_db)
     project = catalog.register_project(
         irods_path="/iplant/p/r1",
         irods_zone="iplant",
@@ -280,7 +280,7 @@ def test_recover_drains_committed_rows(catalog_db: str, tmp_path: Path) -> None:
 @pytest.mark.requires_postgres
 def test_recover_retries_pushes_and_commits(catalog_db: str, tmp_path: Path) -> None:
     """Pending row + local file present + push succeeds -> commit."""
-    catalog = CatalogStore(catalog_db)
+    catalog = PostgresCatalogStore(catalog_db)
     project = catalog.register_project(
         irods_path="/iplant/p/r2",
         irods_zone="iplant",
@@ -312,7 +312,7 @@ def test_recover_retries_pushes_and_commits(catalog_db: str, tmp_path: Path) -> 
 def test_recover_bumps_attempts_on_push_failure(
     catalog_db: str, tmp_path: Path
 ) -> None:
-    catalog = CatalogStore(catalog_db)
+    catalog = PostgresCatalogStore(catalog_db)
     project = catalog.register_project(
         irods_path="/iplant/p/r3",
         irods_zone="iplant",
@@ -344,7 +344,7 @@ def test_recover_bumps_attempts_on_push_failure(
 def test_recover_marks_failed_after_max_attempts(
     catalog_db: str, tmp_path: Path
 ) -> None:
-    catalog = CatalogStore(catalog_db)
+    catalog = PostgresCatalogStore(catalog_db)
     project = catalog.register_project(
         irods_path="/iplant/p/r4",
         irods_zone="iplant",
@@ -378,7 +378,7 @@ def test_recover_marks_failed_after_max_attempts(
 @pytest.mark.requires_postgres
 def test_recover_handles_missing_local(catalog_db: str, tmp_path: Path) -> None:
     """Local cache lost the Parquet — bump attempts and move on."""
-    catalog = CatalogStore(catalog_db)
+    catalog = PostgresCatalogStore(catalog_db)
     project = catalog.register_project(
         irods_path="/iplant/p/r5",
         irods_zone="iplant",
@@ -453,7 +453,7 @@ def test_record_changes_pushes_to_irods_then_commits(
 
     # WAL is drained.
     assert (
-        CatalogStore(catalog_db).get_pending_push(snap.snapshot_id) is None
+        PostgresCatalogStore(catalog_db).get_pending_push(snap.snapshot_id) is None
     )
 
 
@@ -485,7 +485,7 @@ def test_record_changes_keeps_wal_row_when_push_fails(
     with pytest.raises(iRODSSyncError):
         client.record_changes(project.project_id, "alice", [change])
 
-    catalog = CatalogStore(catalog_db)
+    catalog = PostgresCatalogStore(catalog_db)
     # Catalog row stays in 'pending'.
     snaps = catalog.list_snapshots(project.project_id, include_pending=True)
     assert len(snaps) == 1
@@ -534,7 +534,7 @@ def test_record_changes_local_only_when_no_session(
     )
     snap = client.record_changes(project.project_id, "alice", [change])
     assert snap.parquet_file.startswith("snapshot_")
-    catalog = CatalogStore(catalog_db)
+    catalog = PostgresCatalogStore(catalog_db)
     assert catalog.list_pending_pushes() == []
 
 
