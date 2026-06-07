@@ -91,3 +91,35 @@ def test_delete_snapshot(store):
     s = store.create_snapshot(p.project_id, "u", None, None, "snapshot_1.parquet")
     store.delete_snapshot(s.snapshot_id)
     assert store.get_snapshot(s.snapshot_id) is None
+
+
+# ------------------------------------------------------------------ pending pushes
+
+def test_pending_push_insert_idempotent(store):
+    p = _project(store)
+    s = store.create_snapshot(p.project_id, "u", None, None, PARQUET_FILE_PENDING)
+    first = store.insert_pending_push(s.snapshot_id, "/local/snapshot_1.parquet", "/irods/snapshot_1.parquet")
+    again = store.insert_pending_push(s.snapshot_id, "/DIFFERENT", "/DIFFERENT")
+    assert first.snapshot_id == again.snapshot_id
+    # idempotent: original row wins, not the second caller's values
+    assert again.local_path == "/local/snapshot_1.parquet"
+
+
+def test_pending_push_bump_and_get(store):
+    p = _project(store)
+    s = store.create_snapshot(p.project_id, "u", None, None, PARQUET_FILE_PENDING)
+    store.insert_pending_push(s.snapshot_id, "/l", "/i")
+    bumped = store.bump_pending_push_attempt(s.snapshot_id, "boom")
+    assert bumped.attempts == 1 and bumped.last_error == "boom"
+    assert store.get_pending_push(s.snapshot_id).attempts == 1
+    assert store.bump_pending_push_attempt(999999, "x") is None
+
+
+def test_pending_push_list_and_delete(store):
+    p = _project(store)
+    s = store.create_snapshot(p.project_id, "u", None, None, PARQUET_FILE_PENDING)
+    store.insert_pending_push(s.snapshot_id, "/l", "/i")
+    assert len(store.list_pending_pushes()) == 1
+    store.delete_pending_push(s.snapshot_id)
+    assert store.get_pending_push(s.snapshot_id) is None
+    assert store.list_pending_pushes() == []

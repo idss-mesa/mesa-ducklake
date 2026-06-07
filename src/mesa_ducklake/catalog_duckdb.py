@@ -246,6 +246,63 @@ class DuckDBCatalogStore:
         d = self._one("SELECT ts FROM mesa.snapshots WHERE snapshot_id = ?", [snapshot_id])
         return d["ts"] if d else None
 
+    # ------------------------------------------------------------------ pending pushes
+    def insert_pending_push(self, snapshot_id, local_path, irods_target) -> PendingPush:
+        d: dict[str, Any] | None = None
+        try:
+            d = self._one(
+                """INSERT INTO mesa.pending_pushes (snapshot_id, local_path, irods_target)
+                   VALUES (?, ?, ?)
+                   RETURNING snapshot_id, local_path, irods_target,
+                             attempts, last_error, created_at""",
+                [snapshot_id, local_path, irods_target],
+            )
+        except duckdb.ConstraintException:
+            d = None
+        if d is None:
+            d = self._one(
+                """SELECT snapshot_id, local_path, irods_target,
+                          attempts, last_error, created_at
+                   FROM mesa.pending_pushes WHERE snapshot_id = ?""",
+                [snapshot_id],
+            )
+        assert d is not None
+        return _row_to_pending_push(d)
+
+    def delete_pending_push(self, snapshot_id) -> None:
+        self._conn.execute("DELETE FROM mesa.pending_pushes WHERE snapshot_id = ?", [snapshot_id])
+
+    def bump_pending_push_attempt(self, snapshot_id, error, *, error_max_chars=2000) -> PendingPush | None:
+        truncated = error[:error_max_chars] if error else error
+        d = self._one(
+            """UPDATE mesa.pending_pushes
+               SET attempts = attempts + 1, last_error = ?
+               WHERE snapshot_id = ?
+               RETURNING snapshot_id, local_path, irods_target,
+                         attempts, last_error, created_at""",
+            [truncated, snapshot_id],
+        )
+        return _row_to_pending_push(d) if d else None
+
+    def list_pending_pushes(self, limit=100) -> list[PendingPush]:
+        rows = self._all(
+            """SELECT snapshot_id, local_path, irods_target,
+                      attempts, last_error, created_at
+               FROM mesa.pending_pushes
+               ORDER BY created_at ASC, snapshot_id ASC LIMIT ?""",
+            [limit],
+        )
+        return [_row_to_pending_push(d) for d in rows]
+
+    def get_pending_push(self, snapshot_id) -> PendingPush | None:
+        d = self._one(
+            """SELECT snapshot_id, local_path, irods_target,
+                      attempts, last_error, created_at
+               FROM mesa.pending_pushes WHERE snapshot_id = ?""",
+            [snapshot_id],
+        )
+        return _row_to_pending_push(d) if d else None
+
     # ------------------------------------------------------------------ lifecycle
     def close(self) -> None:
         self._conn.close()
