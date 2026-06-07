@@ -123,3 +123,47 @@ def test_pending_push_list_and_delete(store):
     store.delete_pending_push(s.snapshot_id)
     assert store.get_pending_push(s.snapshot_id) is None
     assert store.list_pending_pushes() == []
+
+
+def test_delete_snapshot_cascades_pending_push(store):
+    p = _project(store)
+    s = store.create_snapshot(p.project_id, "u", None, None, PARQUET_FILE_PENDING)
+    store.insert_pending_push(s.snapshot_id, "/l", "/i")
+    store.delete_snapshot(s.snapshot_id)
+    assert store.get_snapshot(s.snapshot_id) is None
+    assert store.get_pending_push(s.snapshot_id) is None
+
+
+def test_bump_truncates_long_error(store):
+    p = _project(store)
+    s = store.create_snapshot(p.project_id, "u", None, None, PARQUET_FILE_PENDING)
+    store.insert_pending_push(s.snapshot_id, "/l", "/i")
+    bumped = store.bump_pending_push_attempt(s.snapshot_id, "x" * 5000, error_max_chars=2000)
+    assert len(bumped.last_error) == 2000
+
+
+def test_list_snapshots_include_pending(store):
+    p = _project(store)
+    committed = store.create_snapshot(p.project_id, "u", None, None, "snapshot_1.parquet")
+    pending = store.create_snapshot(
+        p.project_id, "u", committed.snapshot_id, None, PARQUET_FILE_PENDING
+    )
+    default = store.list_snapshots(p.project_id)
+    assert [x.snapshot_id for x in default] == [committed.snapshot_id]
+    with_pending = store.list_snapshots(p.project_id, include_pending=True)
+    assert {x.snapshot_id for x in with_pending} == {committed.snapshot_id, pending.snapshot_id}
+
+
+def test_latest_snapshot_id_none_when_only_pending(store):
+    p = _project(store)
+    store.create_snapshot(p.project_id, "u", None, None, PARQUET_FILE_PENDING)
+    assert store.latest_snapshot_id(p.project_id) is None
+
+
+def test_memory_backend_constructs():
+    s = DuckDBCatalogStore(":memory:")
+    try:
+        proj = s.register_project("/iplant/home/u/m", "iplant", None, "u")
+        assert s.get_project(proj.project_id) is not None
+    finally:
+        s.close()

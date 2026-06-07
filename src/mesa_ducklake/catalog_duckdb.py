@@ -129,12 +129,7 @@ class DuckDBCatalogStore:
     def _all(self, sql: str, params: list[Any]) -> list[dict[str, Any]]:
         cur = self._conn.execute(sql, params)
         desc = cur.description
-        out = []
-        for r in cur.fetchall():
-            d = _to_dict(desc, r)
-            if d is not None:
-                out.append(d)
-        return out
+        return [{col[0]: val for col, val in zip(desc, r, strict=True)} for r in cur.fetchall()]
 
     # ------------------------------------------------------------------ projects
     def register_project(self, irods_path, irods_zone, ducklake_path, created_by) -> Project:
@@ -197,6 +192,9 @@ class DuckDBCatalogStore:
         return _row_to_snapshot(d)
 
     def delete_snapshot(self, snapshot_id) -> None:
+        # No FK ON DELETE CASCADE in the DuckDB schema, so mirror the
+        # Postgres cascade explicitly: drop any pending-push child first.
+        self._conn.execute("DELETE FROM mesa.pending_pushes WHERE snapshot_id = ?", [snapshot_id])
         self._conn.execute("DELETE FROM mesa.snapshots WHERE snapshot_id = ?", [snapshot_id])
 
     def latest_snapshot_id(self, project_id, *, include_pending=False) -> int | None:
