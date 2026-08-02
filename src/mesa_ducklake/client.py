@@ -47,6 +47,7 @@ from platformdirs import user_cache_dir
 from mesa_ducklake import cache, irods_sync
 from mesa_ducklake.catalog import open_catalog
 from mesa_ducklake.catalog_base import CatalogStore
+from mesa_ducklake.irods_path import ducklake_subpath
 from mesa_ducklake.lake import LakeStore
 from mesa_ducklake.models import PARQUET_FILE_PENDING, AvuChange, Project, Snapshot
 from mesa_ducklake.time_travel import parse_as_of
@@ -113,6 +114,7 @@ class DuckLakeClient:
         cache_dir: str | Path | None = None,
         cache_cap_bytes: int = DEFAULT_CACHE_CAP_BYTES,
         lake_root_override: str | Path | None = None,
+        data_collection: str | None = None,
     ) -> None:
         dsn = catalog_dsn if catalog_dsn is not None else postgres_dsn
         if dsn is None:
@@ -122,6 +124,11 @@ class DuckLakeClient:
         self._catalog_dsn = dsn
         self._postgres_dsn = dsn  # back-compat attribute for any external readers
         self._irods_session = irods_session
+        # Sub-collection under each project root that holds the Parquet
+        # files. Applied at registration time only: an existing project
+        # keeps the ducklake_path recorded in its catalog row, so changing
+        # this does not orphan data already written.
+        self._data_collection = data_collection
 
         # Back-compat: lake_root_override is the historical name; new
         # name is cache_dir. Either works; lake_root_override wins
@@ -206,11 +213,23 @@ class DuckLakeClient:
     # ------------------------------------------------------------------ project lifecycle
 
     def register_project(self, irods_path: str, actor: str, zone: str) -> Project:
-        """Register a new MESA-enabled iRODS project in the catalog."""
+        """Register a new MESA-enabled iRODS project in the catalog.
+
+        The Parquet sub-collection is ``<irods_path>/.mesa/ducklake``
+        unless the client was constructed with ``data_collection``. The
+        resolved path is stored on the project row, so a later change to
+        the setting leaves existing projects reading their original
+        location rather than silently orphaning their files.
+        """
+        ducklake_path = (
+            ducklake_subpath(irods_path, self._data_collection)
+            if self._data_collection
+            else None
+        )
         return self._get_catalog().register_project(
             irods_path=irods_path,
             irods_zone=zone,
-            ducklake_path=None,  # default to <irods_path>/.mesa/ducklake
+            ducklake_path=ducklake_path,
             created_by=actor,
         )
 
