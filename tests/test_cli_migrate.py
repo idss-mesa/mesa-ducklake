@@ -19,7 +19,12 @@ import pytest
 
 from mesa_ducklake.cli import main
 
-DSN = "postgresql://user@localhost:5432/nonexistent_for_tests"
+# A DSN that cannot connect ANYWHERE, including on CI. An earlier
+# version used localhost:5432, which is unreachable on a developer
+# machine but *is* listening on CI (the Postgres service container) --
+# so the "migration fails cleanly" assertions depended on the
+# environment. Port 1 is privileged and never serves Postgres.
+DSN = "postgresql://user@127.0.0.1:1/nonexistent_for_tests?connect_timeout=1"
 
 
 def _run(argv, env_dsn=DSN, monkeypatch=None):

@@ -21,9 +21,6 @@ reachable, those tests are auto-skipped.
 
 from __future__ import annotations
 
-import os
-import shutil
-import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +29,8 @@ from pytest_postgresql import factories
 
 from mesa_ducklake import DuckLakeClient
 from mesa_ducklake.schema import apply_migrations
+
+from ._pg_env import external_postgres, postgres_available
 
 _DUMMY_DSN = "postgresql://mesa:mesa@localhost:5432/mesa_test"
 
@@ -62,61 +61,12 @@ def client_fixture(dummy_irods_session: Any) -> DuckLakeClient:
 # ---------------------------------------------------------------------------
 
 
-#: Set this to point the suite at an already-running Postgres instead of
-#: having ``pytest-postgresql`` start one. This is what CI uses: a
-#: GitHub Actions *service container* supplies a live server, and no
-#: ``pg_ctl`` exists on the runner's PATH to start a cluster with.
-EXTERNAL_PG_HOST_ENV = "MESA_DUCKLAKE_TEST_PG_HOST"
-
-
-def _external_postgres() -> dict[str, Any] | None:
-    """Return connection settings for an externally-managed Postgres.
-
-    ``None`` when no external server is configured, in which case the
-    suite falls back to an ephemeral cluster started by
-    ``pytest-postgresql``.
-    """
-    # ``.strip()``: a variable set to whitespace is "unset", not a host
-    # named " ". Without this the suite would try to connect to nothing
-    # and fail every Postgres test instead of skipping them.
-    host = (os.environ.get(EXTERNAL_PG_HOST_ENV) or "").strip()
-    if not host:
-        return None
-    return {
-        "host": host,
-        "port": int(os.environ.get("MESA_DUCKLAKE_TEST_PG_PORT", "5432")),
-        "user": os.environ.get("MESA_DUCKLAKE_TEST_PG_USER", "postgres"),
-        "password": os.environ.get("MESA_DUCKLAKE_TEST_PG_PASSWORD", "postgres"),
-        "dbname": os.environ.get("MESA_DUCKLAKE_TEST_PG_DBNAME", "mesa_test"),
-    }
-
-
-EXTERNAL_PG = _external_postgres()
-
-
-def _postgres_available() -> bool:
-    """Best-effort probe for a usable Postgres.
-
-    An external server (CI service container) counts: nothing needs to
-    be started, so ``pg_ctl`` is irrelevant there.
-    """
-    if EXTERNAL_PG is not None:
-        return True
-    if shutil.which("pg_ctl") is not None:
-        return True
-    if shutil.which("pg_config") is None:
-        return False
-    try:
-        bindir = subprocess.check_output(
-            ["pg_config", "--bindir"], text=True
-        ).strip()
-    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
-        return False
-    pg_ctl = Path(bindir) / "pg_ctl"
-    return pg_ctl.exists()
-
-
-POSTGRES_AVAILABLE = _postgres_available()
+# The decision of *where* Postgres comes from lives in ``_pg_env`` so it
+# can be unit-tested without reimporting this module — a reimport re-runs
+# the fixture factories below, which does not survive being interleaved
+# with the real Postgres tests.
+EXTERNAL_PG = external_postgres()
+POSTGRES_AVAILABLE = postgres_available()
 
 # When an external server is configured, replace pytest-postgresql's
 # process-starting fixture with a no-op one pointed at it, and rebind

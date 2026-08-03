@@ -13,71 +13,47 @@ the resulting availability verdict, are correct.
 
 from __future__ import annotations
 
-import importlib.util
-import sys
-from pathlib import Path
-
 import pytest
 
-CONFTEST = Path(__file__).parent / "conftest.py"
+from ._pg_env import external_postgres, postgres_available
+
+# Each case passes its environment explicitly. An earlier version of
+# these tests reimported conftest.py to observe its import-time
+# decision, which re-ran pytest-postgresql's fixture factories on every
+# call and broke the full-suite run while both halves passed alone.
 
 
-def _load_conftest(monkeypatch, env: dict[str, str]):
-    """Import conftest.py fresh under a given environment.
-
-    The external-server decision is made at import time (it has to be —
-    the fixtures are defined conditionally), so it can only be tested by
-    reimporting under different environments.
-    """
-    for key in list(sys.modules):
-        if key == "_mesa_conftest_probe":
-            del sys.modules[key]
-    monkeypatch.delenv("MESA_DUCKLAKE_TEST_PG_HOST", raising=False)
-    for k, v in env.items():
-        monkeypatch.setenv(k, v)
-    spec = importlib.util.spec_from_file_location("_mesa_conftest_probe", CONFTEST)
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["_mesa_conftest_probe"] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-def test_no_env_means_no_external_server(monkeypatch):
+def test_no_env_means_no_external_server():
     """A developer machine keeps the ephemeral-cluster behaviour."""
-    mod = _load_conftest(monkeypatch, {})
-    assert mod.EXTERNAL_PG is None
+    assert external_postgres({}) is None
 
 
-def test_host_env_selects_the_external_server(monkeypatch):
-    mod = _load_conftest(monkeypatch, {"MESA_DUCKLAKE_TEST_PG_HOST": "localhost"})
-    assert mod.EXTERNAL_PG is not None
-    assert mod.EXTERNAL_PG["host"] == "localhost"
+def test_host_env_selects_the_external_server():
+    settings = external_postgres({"MESA_DUCKLAKE_TEST_PG_HOST": "localhost"})
+    assert settings is not None
+    assert settings["host"] == "localhost"
 
 
-def test_external_server_counts_as_available(monkeypatch):
+def test_external_server_counts_as_available():
     """Availability must not depend on pg_ctl when nothing needs starting.
 
     This is the crux: the CI runner has no pg_ctl, so a probe that only
     looked for one would mark Postgres unavailable and skip all 40
-    tests despite a healthy service container.
+    Postgres tests despite a healthy service container.
     """
-    mod = _load_conftest(monkeypatch, {"MESA_DUCKLAKE_TEST_PG_HOST": "db"})
-    assert mod.POSTGRES_AVAILABLE is True
+    assert postgres_available({"MESA_DUCKLAKE_TEST_PG_HOST": "db"}) is True
 
 
-def test_connection_settings_come_from_the_environment(monkeypatch):
-    mod = _load_conftest(
-        monkeypatch,
+def test_connection_settings_come_from_the_environment():
+    assert external_postgres(
         {
             "MESA_DUCKLAKE_TEST_PG_HOST": "db.internal",
             "MESA_DUCKLAKE_TEST_PG_PORT": "6543",
             "MESA_DUCKLAKE_TEST_PG_USER": "mesa",
             "MESA_DUCKLAKE_TEST_PG_PASSWORD": "s3cret",
             "MESA_DUCKLAKE_TEST_PG_DBNAME": "otherdb",
-        },
-    )
-    assert mod.EXTERNAL_PG == {
+        }
+    ) == {
         "host": "db.internal",
         "port": 6543,
         "user": "mesa",
@@ -86,13 +62,40 @@ def test_connection_settings_come_from_the_environment(monkeypatch):
     }
 
 
-def test_port_defaults_to_5432(monkeypatch):
-    mod = _load_conftest(monkeypatch, {"MESA_DUCKLAKE_TEST_PG_HOST": "db"})
-    assert mod.EXTERNAL_PG["port"] == 5432
+def test_defaults_fill_in_the_unset_settings():
+    settings = external_postgres({"MESA_DUCKLAKE_TEST_PG_HOST": "db"})
+    assert settings == {
+        "host": "db",
+        "port": 5432,
+        "user": "postgres",
+        "password": "postgres",
+        "dbname": "mesa_test",
+    }
 
 
 @pytest.mark.parametrize("blank", ["", "   "])
-def test_blank_host_is_not_an_external_server(monkeypatch, blank):
+def test_blank_host_is_not_an_external_server(blank):
     """An empty variable is 'unset', not 'connect to the empty host'."""
-    mod = _load_conftest(monkeypatch, {"MESA_DUCKLAKE_TEST_PG_HOST": blank})
-    assert mod.EXTERNAL_PG is None
+    assert external_postgres({"MESA_DUCKLAKE_TEST_PG_HOST": blank}) is None
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_blank_overrides_fall_back_to_defaults(blank):
+    """A set-but-empty override must not become an empty username."""
+    settings = external_postgres(
+        {
+            "MESA_DUCKLAKE_TEST_PG_HOST": "db",
+            "MESA_DUCKLAKE_TEST_PG_USER": blank,
+            "MESA_DUCKLAKE_TEST_PG_PORT": blank,
+        }
+    )
+    assert settings["user"] == "postgres"
+    assert settings["port"] == 5432
+
+
+def test_conftest_uses_the_same_decision():
+    """The conftest must not reimplement this logic."""
+    from . import conftest
+
+    assert conftest.EXTERNAL_PG == external_postgres()
+    assert conftest.POSTGRES_AVAILABLE == postgres_available()
