@@ -48,7 +48,12 @@ jobs:
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: mesa_test
+          # Deliberately NOT the database the tests use. pytest-postgresql's
+          # DatabaseJanitor CREATEs the test database itself, so naming it
+          # here too makes every Postgres test fail with
+          # `DuplicateDatabase: database "..." already exists`. This one
+          # exists only to give the container a database to initialise.
+          POSTGRES_DB: postgres
         ports:
           - 5432:5432
         # The runner must not start the suite before the server accepts
@@ -105,11 +110,17 @@ jobs:
       - name: Migrations apply to a clean database
         # Exercises the `migrate` verb end to end, which the unit tests
         # cannot: they cover argument handling only.
+        #
+        # Its own database, created here. It must not be the one the
+        # pytest fixtures use -- DatabaseJanitor creates and drops that
+        # per test, so sharing it would race this step.
         env:
+          PGPASSWORD: postgres
           MESA_DUCKLAKE_DSN: >-
-            postgresql://postgres:postgres@localhost:5432/mesa_test
+            postgresql://postgres:postgres@localhost:5432/mesa_migrate_check
         run: |
           set -euo pipefail
+          createdb -h localhost -U postgres mesa_migrate_check
           mesa-ducklake migrate
           # Idempotence: a second run must apply nothing.
           out=$(mesa-ducklake migrate)
