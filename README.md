@@ -72,6 +72,33 @@ pytest -q
 ruff check src/ tests/
 ```
 
+### Postgres-backed tests
+
+About 40 tests cover the Postgres catalog backend and are marked
+`requires_postgres`. They **skip themselves** when no server is
+reachable, so `pytest -q` can report all-green while exercising none of
+that code — check the skip count, not just the exit status.
+
+Two ways to run them:
+
+```bash
+# 1. Let pytest-postgresql start an ephemeral cluster. Needs a Postgres
+#    installation on PATH (`pg_ctl`, or `pg_config` pointing at one).
+pytest -q -m requires_postgres
+
+# 2. Point the suite at a server you already have — a container, a local
+#    instance, whatever. No pg_ctl needed.
+docker run --rm -d -p 5432:5432 \
+    -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=mesa_test postgres:16
+MESA_DUCKLAKE_TEST_PG_HOST=localhost pytest -q -m requires_postgres
+```
+
+The second form is what CI uses, with a GitHub Actions service
+container. Overrides: `MESA_DUCKLAKE_TEST_PG_{PORT,USER,PASSWORD,DBNAME}`
+(defaults `5432` / `postgres` / `postgres` / `mesa_test`). Each test
+still gets its own database on the server, so isolation matches the
+ephemeral-cluster path.
+
 ## Status
 
 Pre-alpha but functional. The `DuckLakeClient` API is implemented:

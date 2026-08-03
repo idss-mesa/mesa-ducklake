@@ -144,7 +144,7 @@ def main(
         verb = "record"
     else:
         verb = argv[0]
-    if verb not in {"record", "recover"}:
+    if verb not in {"record", "recover", "migrate"}:
         _stderr_json(
             stderr,
             {"code": "unknown_verb", "message": f"unknown verb {verb!r}"},
@@ -169,6 +169,9 @@ def main(
     if verb == "recover":
         return _recover(dsn, stdout, stderr)
 
+    if verb == "migrate":
+        return _migrate(dsn, argv[1:], stdout, stderr)
+
     try:
         raw = stdin.read()
         if not raw.strip():
@@ -184,6 +187,59 @@ def main(
         return 1
 
     return _record(payload, dsn, stdout, stderr)
+
+
+def _migrate(
+    dsn: str, args: list[str], stdout: IO[str], stderr: IO[str]
+) -> int:
+    """Apply pending Postgres migrations.
+
+    :func:`mesa_ducklake.schema.apply_migrations` is documented as the
+    only code path that mutates the live schema, but nothing outside the
+    test suite called it — an operator had no supported way to create the
+    ``mesa`` schema before first use. This verb is that way.
+
+    Accepts an optional ``--target N`` to stop at a specific migration
+    version, which is what makes a staged rollout or a bisect possible.
+    Idempotent: re-running applies nothing and reports ``applied: 0``.
+    """
+    from mesa_ducklake.schema import apply_migrations
+
+    target: int | None = None
+    if args:
+        if args[0] != "--target" or len(args) < 2:
+            _stderr_json(
+                stderr,
+                {
+                    "code": "invalid_input",
+                    "message": "usage: mesa-ducklake migrate [--target N]",
+                },
+            )
+            return 1
+        try:
+            target = int(args[1])
+        except ValueError:
+            _stderr_json(
+                stderr,
+                {
+                    "code": "invalid_input",
+                    "message": f"--target must be an integer, got {args[1]!r}",
+                },
+            )
+            return 1
+
+    try:
+        applied = apply_migrations(dsn, target=target)
+    except Exception as exc:
+        _stderr_json(
+            stderr,
+            {"code": "migration_failed", "message": f"{type(exc).__name__}: {exc}"},
+        )
+        return 2
+
+    json.dump({"applied": applied, "target": target}, stdout)
+    stdout.write("\n")
+    return 0
 
 
 def _recover(dsn: str, stdout: IO[str], stderr: IO[str]) -> int:

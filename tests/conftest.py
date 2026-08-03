@@ -21,15 +21,16 @@ reachable, those tests are auto-skipped.
 
 from __future__ import annotations
 
-import shutil
-import subprocess
 from pathlib import Path
 from typing import Any
 
 import pytest
+from pytest_postgresql import factories
 
 from mesa_ducklake import DuckLakeClient
 from mesa_ducklake.schema import apply_migrations
+
+from ._pg_env import external_postgres, postgres_available
 
 _DUMMY_DSN = "postgresql://mesa:mesa@localhost:5432/mesa_test"
 
@@ -60,23 +61,30 @@ def client_fixture(dummy_irods_session: Any) -> DuckLakeClient:
 # ---------------------------------------------------------------------------
 
 
-def _postgres_available() -> bool:
-    """Best-effort probe for a usable ``pg_ctl`` on the host."""
-    if shutil.which("pg_ctl") is not None:
-        return True
-    if shutil.which("pg_config") is None:
-        return False
-    try:
-        bindir = subprocess.check_output(
-            ["pg_config", "--bindir"], text=True
-        ).strip()
-    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
-        return False
-    pg_ctl = Path(bindir) / "pg_ctl"
-    return pg_ctl.exists()
+# The decision of *where* Postgres comes from lives in ``_pg_env`` so it
+# can be unit-tested without reimporting this module — a reimport re-runs
+# the fixture factories below, which does not survive being interleaved
+# with the real Postgres tests.
+EXTERNAL_PG = external_postgres()
+POSTGRES_AVAILABLE = postgres_available()
 
-
-POSTGRES_AVAILABLE = _postgres_available()
+# When an external server is configured, replace pytest-postgresql's
+# process-starting fixture with a no-op one pointed at it, and rebind
+# ``postgresql`` to connect through that. Each test still gets its own
+# freshly-created database on the shared server, so isolation is
+# unchanged from the ephemeral-cluster path.
+if EXTERNAL_PG is not None:
+    postgresql_external_proc = factories.postgresql_noproc(
+        host=EXTERNAL_PG["host"],
+        port=EXTERNAL_PG["port"],
+        user=EXTERNAL_PG["user"],
+        password=EXTERNAL_PG["password"],
+        dbname=EXTERNAL_PG["dbname"],
+    )
+    postgresql = factories.postgresql(
+        "postgresql_external_proc",
+        dbname=EXTERNAL_PG["dbname"],
+    )
 
 
 def pytest_configure(config: pytest.Config) -> None:

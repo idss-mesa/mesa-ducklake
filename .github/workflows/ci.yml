@@ -1,0 +1,128 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Fast feedback: lint and types, no database needed.
+  static:
+    name: lint + types
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Ruff
+        run: ruff check src/ tests/
+      - name: Mypy
+        # Advisory: type coverage is incomplete, so a finding should not
+        # block a merge that is otherwise green.
+        continue-on-error: true
+        run: mypy src/
+
+  test:
+    name: test (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    # A live Postgres for the catalog-backend tests. Without this the
+    # suite still passes, but ~40 tests covering the entire Postgres
+    # catalog backend skip themselves -- green for the wrong reason.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          # Deliberately NOT the database the tests use. pytest-postgresql's
+          # DatabaseJanitor CREATEs the test database itself, so naming it
+          # here too makes every Postgres test fail with
+          # `DuplicateDatabase: database "..." already exists`. This one
+          # exists only to give the container a database to initialise.
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        # The runner must not start the suite before the server accepts
+        # connections; without this the first test races the container.
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # Point the suite at the service container. Absent these, the
+      # conftest falls back to pytest-postgresql starting its own
+      # cluster, which is what happens on a developer machine.
+      MESA_DUCKLAKE_TEST_PG_HOST: localhost
+      MESA_DUCKLAKE_TEST_PG_PORT: "5432"
+      MESA_DUCKLAKE_TEST_PG_USER: postgres
+      MESA_DUCKLAKE_TEST_PG_PASSWORD: postgres
+      MESA_DUCKLAKE_TEST_PG_DBNAME: mesa_test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run the suite
+        run: pytest -q
+
+      - name: Assert the Postgres tests actually ran
+        # The whole point of the service container. Every Postgres test
+        # is marked ``requires_postgres`` and skips itself when no server
+        # is reachable -- so a misconfigured container would leave the
+        # suite green while testing none of the catalog backend. Fail
+        # loudly instead.
+        run: |
+          set -euo pipefail
+          pytest -q -m requires_postgres --no-header -rN | tee /tmp/pg.txt
+          if grep -qE '[0-9]+ skipped' /tmp/pg.txt; then
+            echo "::error::requires_postgres tests were SKIPPED — the service container is not reachable"
+            exit 1
+          fi
+          if ! grep -qE '[0-9]+ passed' /tmp/pg.txt; then
+            echo "::error::no requires_postgres tests ran"
+            exit 1
+          fi
+
+      - name: Migrations apply to a clean database
+        # Exercises the `migrate` verb end to end, which the unit tests
+        # cannot: they cover argument handling only.
+        #
+        # Its own database, created here. It must not be the one the
+        # pytest fixtures use -- DatabaseJanitor creates and drops that
+        # per test, so sharing it would race this step.
+        env:
+          PGPASSWORD: postgres
+          MESA_DUCKLAKE_DSN: >-
+            postgresql://postgres:postgres@localhost:5432/mesa_migrate_check
+        run: |
+          set -euo pipefail
+          createdb -h localhost -U postgres mesa_migrate_check
+          mesa-ducklake migrate
+          # Idempotence: a second run must apply nothing.
+          out=$(mesa-ducklake migrate)
+          echo "$out"
+          echo "$out" | python -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if d['applied']==0 else 1)"
