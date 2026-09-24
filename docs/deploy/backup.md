@@ -23,7 +23,7 @@ story for that data plane.
 * For sub-minute RPO we'd ship Postgres WAL segments to iRODS as
   they're generated (``archive_command = 'iput …'``) — that's
   deferred future work, intentionally out of scope for the current
-  milestone (see ``help-me-come-up-refactored-brooks.md`` plan).
+  milestone (tracked in ``NEXT_STEPS.md``).
 
 ## What gets backed up
 
@@ -157,8 +157,15 @@ corrupted) and you need to rebuild from the most recent dump:
 
    ```bash
    MESA_DUCKLAKE_DSN="postgresql://mesa:$(sudo cat /etc/mesa-mcp/secrets/postgres_password)@127.0.0.1:5432/mesa_ducklake" \
-   /home/exouser/mesa-ducklake/.venv/bin/mesa-ducklake recover
+   <venv>/bin/mesa-ducklake recover
    ```
+
+   Replace ``<venv>`` with the virtualenv that mesa-ducklake is
+   installed in on this host. ``recover`` needs an iRODS environment
+   (``~/.irods/irods_environment.json`` or ``IRODS_ENVIRONMENT_FILE``).
+   If the dump predates a migration that the installed code ships, run
+   ``<venv>/bin/mesa-ducklake migrate`` with the same DSN first. It is
+   idempotent.
 
 7. **Restart mesa-mcp.**
 
@@ -170,6 +177,35 @@ corrupted) and you need to rebuild from the most recent dump:
 8. **Sanity check** by listing a project's snapshots from the
    restored catalog and confirming the count matches what iRODS shows
    for that project's ``.mesa/ducklake/`` collection.
+
+## Backing up a DuckDB-file catalog
+
+The ``pg_dump`` pipeline above covers the Postgres catalog only. A
+single-user deployment that uses a DuckDB-file catalog
+(``duckdb:///…/catalog.duckdb``, see [`duckdb-catalog.md`](./duckdb-catalog.md))
+is backed up by copying the file:
+
+1. **Make sure no writer holds it.** Stop the process that owns the
+   catalog, for example the local mesa-mcp. A clean close checkpoints
+   the DuckDB write-ahead log into the main file.
+2. **Copy the file, plus any ``.wal`` sidecar.** If a
+   ``catalog.duckdb.wal`` file exists next to the database (left
+   behind by an unclean shutdown), copy it too, or restart and cleanly
+   stop the process once to fold it in.
+
+   ```bash
+   cp catalog.duckdb "catalog-$(date +%F).duckdb"
+   [ -f catalog.duckdb.wal ] && cp catalog.duckdb.wal "catalog-$(date +%F).duckdb.wal"
+   iput -f "catalog-$(date +%F).duckdb" /iplant/home/<user>/backups/
+   ```
+
+3. **Restart the process.**
+
+To restore, put the copy back at the DSN's path while nothing is
+running, then run ``mesa-ducklake recover`` with
+``MESA_DUCKLAKE_DSN=duckdb:///…`` to drain any in-flight pushes the
+copy captured. A copy taken while a writer is active may be
+inconsistent. Do not copy a live file.
 
 ## What can still go wrong after recovery
 
@@ -189,4 +225,5 @@ corrupted) and you need to rebuild from the most recent dump:
 
 - ``deploy/backup-pg.sh`` — the script the timer runs.
 - ``docs/dev/architecture.md`` — why the catalog is the index of truth.
-- ``docs/user/cli.md`` — the ``mesa-ducklake recover`` command.
+- ``docs/user/cli.md`` — the ``mesa-ducklake recover`` and ``migrate`` commands.
+- ``docs/deploy/duckdb-catalog.md`` — the DuckDB-file catalog backend.

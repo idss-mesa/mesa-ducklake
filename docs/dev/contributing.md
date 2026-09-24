@@ -1,27 +1,32 @@
 # Contributing
 
 What this page covers: how to make a clean PR against mesa-ducklake,
-the hard contracts you must respect, when to use the
-`ducklake-engineer` sub-agent, and the local test loop.
+the hard contracts you must respect, the local test loop, and the
+Claude Code agents and skills that ship with the repo.
 
 ## Before you start
 
 Read [`../../CLAUDE.md`](../../CLAUDE.md) front-to-back. It documents
 the project's architecture, the hard contracts, and the AVU shape
 that mesa-ducklake mirrors from iRODS iCAT. Most PR review
-discussion is about whether a change respects those contracts.
+discussion is about whether a change respects those contracts. If you
+use a different coding agent (Codex, opencode, goose and so on), it
+should read [`../../AGENTS.md`](../../AGENTS.md), a short
+vendor-neutral summary of the same rules and commands.
 
 The hard contracts, in one paragraph: the AVU triple
 `(attribute, value, unit)` is canonical and never split; `avu_changes`
 is append-only (corrections are new snapshots); one
 `record_changes` call equals one snapshot equals one Parquet file;
 per-project Parquet files live under `<project_root>/.mesa/ducklake/`
-in iRODS; `DuckLakeClient` is the only public class.
+in iRODS; every `AvuChange` carries non-empty `actor` and `source`;
+`DuckLakeClient` is the only public class; the Postgres and DuckDB
+catalog backends stay at parity.
 
 ## Local development
 
 ```bash
-git clone git@github.com:cyverse/mesa-ducklake.git
+git clone git@github.com:idss-mesa/mesa-ducklake.git
 cd mesa-ducklake
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
@@ -33,10 +38,44 @@ Run the test suite:
 pytest -q
 ```
 
-The suite uses `pytest-postgresql` for an ephemeral Postgres per
-session. Tests that need a live Postgres are marked with
-`@pytest.mark.requires_postgres` and auto-skip on hosts without
-`pg_ctl` reachable.
+Tests that need Postgres are marked `@pytest.mark.requires_postgres`.
+They **skip themselves** when no server is reachable, so check the
+skip count and not just the exit status. There are two ways to run
+them:
+
+```bash
+# 1. pytest-postgresql starts an ephemeral cluster (needs pg_ctl on PATH)
+pytest -q -m requires_postgres
+
+# 2. point at a server you already run (what CI does)
+docker run --rm -d -p 5432:5432 \
+    -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=mesa_test postgres:16
+MESA_DUCKLAKE_TEST_PG_HOST=localhost pytest -q -m requires_postgres
+```
+
+Overrides: `MESA_DUCKLAKE_TEST_PG_{PORT,USER,PASSWORD,DBNAME}`
+(defaults `5432` / `postgres` / `postgres` / `mesa_test`). Each test
+still gets its own database.
+
+The DuckDB-catalog tests (`tests/test_catalog_duckdb.py`,
+`tests/test_client_e2e_duckdb.py`, `tests/test_open_catalog.py`) need
+no server and always run.
+
+Run a single test with `pytest tests/test_cli.py::test_name -q`.
+
+### Live and LLM end-to-end tests
+
+`tests/llm_e2e/` holds two **opt-in** tiers that never run in the
+default `pytest -q`:
+
+- `live_e2e` drives mesa-mcp and mesa-ducklake against a real iRODS
+  server with scripted tool calls.
+- `llm_e2e` has a real LLM drive the same scenarios through
+  mesa-mcp's tools.
+
+Setup, environment variables and result triage are covered in
+[`llm-e2e-tests.md`](./llm-e2e-tests.md). The `run-llm-e2e` skill and
+the `llm-e2e-triage` agent automate the loop (see below).
 
 Lint and type-check:
 
@@ -73,27 +112,43 @@ until they are green.
   out the new number in the PR description so reviewers can
   spot conflicts with parallel work.
 
-## When to use the `ducklake-engineer` sub-agent
+## Claude Code agents and skills
 
-The repo ships a Claude Code sub-agent at
-[`../../.claude/agents/ducklake-engineer.md`](../../.claude/agents/ducklake-engineer.md).
-It is the right tool for **non-trivial** changes where the project's
-hard contracts are load-bearing:
+The repo ships project-scoped Claude Code subagents in
+[`../../.claude/agents/`](../../.claude/agents/) and skills in
+[`../../.claude/skills/`](../../.claude/skills/). They load
+automatically when you run `claude` from the repo root.
 
-- Adding a Postgres or Parquet column.
-- Introducing a new migration number.
-- Authoring a new time-travel query shape.
-- Changing the `DuckLakeClient` public API surface.
-- Anything that affects the wire contract with mesa-mcp.
+**Agents.** To use one, ask for it by name, for example "use the
+contract-reviewer agent to review my diff", or @-mention it (type
+`@` and pick the agent from the list). Claude Code also delegates on its own
+when a task matches an agent's description. `/agents` lists and edits
+them; it does not run them.
 
-Invoke it (`/agents ducklake-engineer` or the IDE's sub-agent
-chooser) and describe the change. The agent reads `CLAUDE.md`,
-follows the [schema change protocol](#schema-change-protocol)
-below automatically, and produces a PR-ready patch.
+| Agent | Use it for |
+|---|---|
+| `ducklake-engineer` | Non-trivial changes where hard contracts are load-bearing: new catalog or Parquet columns, new migrations, new time-travel query shapes, `DuckLakeClient` API changes, anything touching the mesa-mcp wire contract. |
+| `contract-reviewer` | Read-only review of a diff or branch against the hard contracts (AVU triple, append-only, one snapshot per call, provenance, public API, backend parity, frozen migrations, docs updated). Run it before opening a PR. |
+| `docs-auditor` | Finding docs that contradict the code, with file:line evidence and a suggested fix. Run it after a refactor or before a release. |
+| `llm-e2e-triage` | Classifying failures in a `.llm-e2e-results/<run>/` directory as a model-behavior issue, a mesa-mcp bug, a mesa-ducklake bug, an external flake or a harness bug. |
+
+**Skills.** Skills are checklists that Claude loads when a task
+matches them. You can also invoke one directly with `/<skill-name>`.
+
+| Skill | Use it when |
+|---|---|
+| `add-migration` | Changing the catalog schema. It covers the Postgres migration, the DuckDB `_SCHEMA_STATEMENTS` twin, models, docs and tests. |
+| `add-catalog-op` | Adding or changing a method on the `CatalogStore` Protocol and both backends. |
+| `run-llm-e2e` | Running the `live_e2e` / `llm_e2e` tiers and triaging the results. |
+| `docs-sync` | After any code change, to find and update the docs that describe the touched modules. |
 
 For routine work (typo fixes, comment edits, single-file logic
-changes that do not affect contracts) the sub-agent is overkill —
-use the main agent or work by hand.
+changes that do not affect contracts), the agents are overkill.
+
+Design records (the "why" behind larger changes) live in
+[`../design/`](../design/README.md). New implementation plans are
+produced in Claude Code plan mode. Commit one only when it carries
+lasting design value; the design README explains the convention.
 
 ## Schema change protocol
 
@@ -112,11 +167,15 @@ If you change a schema by hand, follow it explicitly.
 4. **Backward compatibility.** Old Parquet files must remain
    readable. Use nullable columns and default values. Never
    reorder.
-5. **Update `models.py`** to reflect the new field.
-6. **Update `DuckLakeClient`** only if the new field is part of
+5. **Mirror catalog changes in the DuckDB backend** by appending
+   idempotent statements to `_SCHEMA_STATEMENTS` in
+   `src/mesa_ducklake/catalog_duckdb.py`.
+6. **Update `models.py`** to reflect the new field.
+7. **Update `DuckLakeClient`** only if the new field is part of
    the public contract.
-7. **Tests.** Add a migration round-trip test plus a regression
-   test for every affected query.
+8. **Tests.** Add a migration round-trip test for each backend,
+   plus a regression test for every affected query.
+9. **Docs.** Update [`schema.md`](./schema.md).
 
 ## Test expectations
 
@@ -127,8 +186,11 @@ For any new feature, the test suite must cover at minimum:
 - N snapshots with intermediate deletes (supersede chains).
 - Time-travel reads at three boundaries: before, at, and after a
   known snapshot.
-- Failure paths: invalid input rejected at the model layer;
-  partial Parquet write rolled back in the catalog.
+- Failure paths: invalid input rejected at the model layer; a
+  failed Parquet write rolled back in the catalog (local-only mode);
+  a failed push leaving a `pending` row plus WAL row for recovery
+  (sync mode).
+- Both catalog backends, when the change touches the catalog.
 
 Use `tmp_path`-rooted DuckLakes for tests; never share lake
 state between tests.
@@ -153,5 +215,12 @@ include in the PR description:
   numbering rule and the bookkeeping table bootstrap.
 - [`queries.md`](./queries.md) — the canonical query shape any
   new read path must mirror.
-- [`../../.claude/agents/ducklake-engineer.md`](../../.claude/agents/ducklake-engineer.md) —
-  the sub-agent playbook.
+- [`llm-e2e-tests.md`](./llm-e2e-tests.md) — the opt-in live and
+  LLM end-to-end tiers.
+- [`architecture-review-2026-09.md`](./architecture-review-2026-09.md) —
+  point-in-time architecture review.
+- [`../../.claude/agents/`](../../.claude/agents/) and
+  [`../../.claude/skills/`](../../.claude/skills/) — the agent and
+  skill definitions.
+- [`../../AGENTS.md`](../../AGENTS.md) — vendor-neutral agent
+  instructions.

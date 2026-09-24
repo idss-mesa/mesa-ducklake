@@ -265,3 +265,33 @@ def test_provenance_round_trips_through_parquet(tmp_lake_root: Path) -> None:
     assert row.source == "irods-rule:acPostProcForModifyAVUMetadata"
     assert row.via_ticket == "tkt-42"
     assert row.rule_invocation == "mesa_avu_change"
+
+
+def test_legacy_rows_with_blank_provenance_stay_readable(tmp_lake_root: Path) -> None:
+    """History written before provenance was enforced must not become unreadable.
+
+    Parquet is append-only, so a pre-validator row with an empty actor can
+    never be fixed; reads have to keep returning it.
+    """
+    store = LakeStore(tmp_lake_root)
+    project_id = uuid4()
+    path = "/iplant/home/alice/proj/legacy.csv"
+    ts = datetime(2026, 1, 1, tzinfo=UTC)
+    # model_construct bypasses the input validator, standing in for a row
+    # written by an older release.
+    legacy = AvuChange.model_construct(
+        project_id=None, snapshot_id=None, irods_path=path, target_type="data_object",
+        attribute="envo.biome", value="forest", unit="ENVO:00000428", op="add",
+        actor="", ts=ts, source="", via_ticket=None, rule_invocation=None,
+    )
+    store.write_changes(project_id, 1, [legacy])
+
+    history = store.read_history(project_id, path)
+    assert [(r.actor, r.source) for r in history] == [("", "")]
+    effective = store.read_effective_avus(project_id, path, ts + timedelta(days=1))
+    assert [(r.attribute, r.actor) for r in effective] == [("envo.biome", "")]
+    assert len(store.diff(project_id, 0, 1)) == 1
+
+    # New input is still rejected.
+    with pytest.raises(ValueError):
+        _change(path, "a", "v", ts=ts, actor="")

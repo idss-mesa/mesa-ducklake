@@ -1,0 +1,63 @@
+# Local self-hosted LLM stack for the llm_e2e tier (tests/llm_e2e).
+#
+#   cp .env.example .env          # set LITELLM_MASTER_KEY (and HF_TOKEN if needed)
+#   docker compose up -d
+#   export LLM_MODEL=openai/e2e-tools LLM_BASE_URL=http://localhost:4000 \
+#          LLM_API_KEY=$LITELLM_MASTER_KEY
+#
+# vLLM serves the model with OpenAI-style tool calling; the LiteLLM proxy in
+# front gives it the same alias-based interface as the CARC and AI Verde
+# gateways, so a run here and a run there differ only in env vars. To skip
+# the proxy, point the suite straight at vLLM instead:
+#   LLM_MODEL=hosted_vllm/qwen3-8b LLM_BASE_URL=http://localhost:8000/v1
+#
+# Needs an NVIDIA GPU with the container toolkit. Pick a model that fits it
+# (VLLM_MODEL); the tool-call parser must match the model family
+# (hermes for Qwen, llama3_json for Llama 3.x, openai for gpt-oss).
+
+services:
+  vllm:
+    image: vllm/vllm-openai:${VLLM_IMAGE_TAG:-latest}
+    command:
+      - --model=${VLLM_MODEL:-Qwen/Qwen3-8B}
+      - --served-model-name=qwen3-8b
+      - --enable-auto-tool-choice
+      - --tool-call-parser=${VLLM_TOOL_PARSER:-hermes}
+      # Keeps Qwen3's <think> blocks out of message.content.
+      - --reasoning-parser=${VLLM_REASONING_PARSER:-qwen3}
+      - --max-model-len=${VLLM_MAX_MODEL_LEN:-32768}
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    ports:
+      - "8000:8000"
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 40
+
+  litellm:
+    image: ghcr.io/berriai/litellm:${LITELLM_IMAGE_TAG:-main-stable}
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    environment:
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?set LITELLM_MASTER_KEY in .env}
+    volumes:
+      - ./litellm.config.yaml:/app/config.yaml:ro
+    ports:
+      - "4000:4000"
+    depends_on:
+      vllm:
+        condition: service_healthy
+
+volumes:
+  hf-cache:

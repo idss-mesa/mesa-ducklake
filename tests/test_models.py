@@ -44,6 +44,14 @@ def test_avu_change_rejects_invalid_target_type() -> None:
         AvuChange(**_valid_avu_kwargs(target_type="bucket"))
 
 
+@pytest.mark.parametrize("field", ["actor", "source"])
+@pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
+def test_avu_change_rejects_empty_provenance(field: str, blank: str) -> None:
+    """Provenance is mandatory; a blank author or origin is a bug, not data."""
+    with pytest.raises(ValidationError):
+        AvuChange(**_valid_avu_kwargs(**{field: blank}))
+
+
 def test_avu_change_ts_is_timezone_aware() -> None:
     change = AvuChange(**_valid_avu_kwargs())
     assert change.ts.tzinfo is not None

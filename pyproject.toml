@@ -36,13 +36,19 @@ dev = [
     "ruff",
     "mypy",
 ]
+# Live e2e tiers (tests/llm_e2e). mesa-mcp itself is not on PyPI; install it
+# from the sibling checkout: pip install -e "../mesa-mcp[ducklake]".
+llm-e2e = [
+    "litellm>=1.50",
+    "mcp>=2.0,<3",
+]
 
 [project.scripts]
 mesa-ducklake = "mesa_ducklake.cli:_console_main"
 
 [project.urls]
-Homepage = "https://github.com/cyverse/mesa-ducklake"
-Repository = "https://github.com/cyverse/mesa-ducklake"
+Homepage = "https://github.com/idss-mesa/mesa-ducklake"
+Repository = "https://github.com/idss-mesa/mesa-ducklake"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mesa_ducklake"]

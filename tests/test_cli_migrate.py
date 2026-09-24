@@ -74,3 +74,38 @@ def test_other_verbs_still_route(monkeypatch):
     code, _, err = _run(["nonsense"], monkeypatch=monkeypatch)
     assert code == 1
     assert json.loads(err)["code"] == "unknown_verb"
+
+
+def test_migrate_bootstraps_a_duckdb_catalog(tmp_path, monkeypatch):
+    """A DuckDB catalog has no migrations; ``migrate`` creates its schema."""
+    db = tmp_path / "sub" / "catalog.duckdb"
+    code, out, err = _run(["migrate"], env_dsn=f"duckdb://{db}", monkeypatch=monkeypatch)
+    assert code == 0, err
+    assert json.loads(out) == {"applied": 0, "target": None, "backend": "duckdb"}
+    assert db.exists()
+
+    import duckdb
+
+    with duckdb.connect(str(db)) as conn:
+        tables = {
+            r[0]
+            for r in conn.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = 'mesa'"
+            ).fetchall()
+        }
+    assert {"projects", "snapshots", "pending_pushes"} <= tables
+
+
+def test_migrate_on_duckdb_is_idempotent(tmp_path, monkeypatch):
+    dsn = f"duckdb://{tmp_path / 'catalog.duckdb'}"
+    for _ in range(2):
+        code, out, _ = _run(["migrate"], env_dsn=dsn, monkeypatch=monkeypatch)
+        assert code == 0
+        assert json.loads(out)["applied"] == 0
+
+
+def test_migrate_rejects_an_unrecognised_dsn(monkeypatch):
+    code, _, err = _run(["migrate"], env_dsn="mysql://nope", monkeypatch=monkeypatch)
+    assert code == 2
+    assert json.loads(err)["code"] == "migration_failed"

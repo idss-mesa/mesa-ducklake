@@ -1,0 +1,80 @@
+name: LLM e2e (manual)
+
+# Live e2e tiers from tests/llm_e2e: real mesa-mcp over MCP stdio, live
+# iRODS and EBI OLS4, a real catalog, and a self-hosted model. Manual only:
+# it writes to a live Data Store and needs a runner that can reach the
+# model endpoint (the CARC LiteLLM is in-cluster only; GitHub-hosted
+# runners cannot reach it). Register a self-hosted runner with the
+# `llm-e2e` label where it can.
+#
+# Secrets: IRODS_USER, IRODS_PASSWORD, LLM_API_KEY, and optionally
+# E2E_CATALOG_DSN (a dedicated Postgres, never production). Variables:
+# E2E_IRODS_ROOT, LLM_MODEL, LLM_BASE_URL.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: "Which tier(s) to run"
+        type: choice
+        options: [live_e2e, llm_e2e, both]
+        default: both
+      repeats:
+        description: "LLM_REPEATS (pass@k)"
+        default: "1"
+      mesa_mcp_ref:
+        # The ticket_provenance and apply_term_ror scenarios need fixes that
+        # are on this branch; switch the default back to main once it merges.
+        description: "idss-mesa/mesa-mcp ref to test against"
+        default: fix/ducklake-provenance-and-ols-config
+
+concurrency:
+  group: llm-e2e
+  cancel-in-progress: false
+
+jobs:
+  e2e:
+    runs-on: [self-hosted, llm-e2e]
+    timeout-minutes: 120
+    env:
+      MESA_E2E_IRODS_ROOT: ${{ vars.E2E_IRODS_ROOT }}
+      MESA_E2E_CATALOG_DSN: ${{ secrets.E2E_CATALOG_DSN }}
+      MESA_E2E_RUN_ID: gh-${{ github.run_id }}-${{ github.run_attempt }}
+      MESA_MCP_IRODS_USER: ${{ secrets.IRODS_USER }}
+      MESA_MCP_IRODS_PASSWORD: ${{ secrets.IRODS_PASSWORD }}
+      LLM_MODEL: ${{ vars.LLM_MODEL }}
+      LLM_BASE_URL: ${{ vars.LLM_BASE_URL }}
+      LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+      LLM_REPEATS: ${{ inputs.repeats }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: idss-mesa/mesa-mcp
+          ref: ${{ inputs.mesa_mcp_ref }}
+          path: mesa-mcp
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,llm-e2e]" -e "./mesa-mcp[ducklake]"
+      - name: Prepare a Postgres catalog
+        if: env.MESA_E2E_CATALOG_DSN != ''
+        env:
+          MESA_DUCKLAKE_DSN: ${{ secrets.E2E_CATALOG_DSN }}
+        run: mesa-ducklake migrate
+      # One pytest process for both tiers: the LLM tier consults the scripted
+      # results of the same run to tell pipeline bugs from model failures.
+      - name: Run
+        env:
+          MARKERS: ${{ inputs.tier == 'both' && 'live_e2e or llm_e2e' || inputs.tier }}
+        run: pytest -m "$MARKERS" tests/llm_e2e -v -rs
+      - name: Upload transcripts and report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: llm-e2e-${{ github.run_id }}
+          path: .llm-e2e-results/
+          if-no-files-found: ignore

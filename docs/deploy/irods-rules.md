@@ -8,14 +8,12 @@ mesa-ducklake's history. The rules shell out to the
 `mesa-ducklake record` CLI documented at
 [`../user/cli.md`](../user/cli.md).
 
-> **Status: in progress.** The `irods-rules/` directory and the
-> rule scripts described below are being added in parallel by a
-> sibling agent. This page documents the intended deployment
-> shape per
-> [`../../CLAUDE.md`](../../CLAUDE.md) section *"iRODS rules,
-> policies, and tickets integration"*. The contract between the
-> rules and the CLI is fixed; the rule files themselves are
-> still landing.
+> **Status:** the rule files ship in [`../../irods-rules/`](../../irods-rules/)
+> and the `mesa-ducklake record` CLI they call is implemented. They
+> have **not yet been deployed on a production iRODS server**. Two
+> open issues from the security review also affect them: JSON escaping
+> of AVU strings in `mesa_avu_change.re`, and GenQuery interpolation
+> in `mesa_enroll_policy.re`. See [`../../NEXT_STEPS.md`](../../NEXT_STEPS.md).
 
 ## Why rule callbacks exist
 
@@ -37,8 +35,7 @@ change with `source="irods-rule:<event>"` and
 
 ## Contents of `irods-rules/`
 
-The repo's `irods-rules/` directory ships these files (when the
-parallel agent's work lands):
+The repo's `irods-rules/` directory ships these files:
 
 | File | Purpose |
 |---|---|
@@ -47,14 +44,28 @@ parallel agent's work lands):
 | `mesa_enroll_policy.re` | Policy hook that auto-enrolls new collections under a configured parent (e.g. everything under `/iplant/home/<u>/projects/`) by calling `mesa_ducklake_init_project`. |
 | `README.md` | Per-rule install notes (file checksums, supported iRODS versions, troubleshooting). |
 
-Until the parallel agent's PR merges, treat the file list above
-as the contract.
+The rule-to-CLI contract is the flat stdin JSON object documented in
+[`../user/cli.md`](../user/cli.md#stdin-one-flat-json-object).
+
+> **Where rule-captured Parquet ends up.** `mesa-ducklake record`
+> runs in local-only mode: it never opens an iRODS session. The
+> catalog row is committed, but the Parquet file is written only to
+> the local cache of the account that runs the CLI on the iRODS server
+> (normally the `irods` service account, under
+> `platformdirs.user_cache_dir("mesa-ducklake")`). It is **not**
+> pushed to the project's `.mesa/ducklake/` collection. Until that gap
+> is closed, rule-captured history is readable only from that host's
+> cache, and cache eviction there can remove it. Set a generous cache
+> cap (or back that cache directory up) on the rule host.
 
 ## Prerequisites on the iRODS server
 
 - iRODS 4.3.x with the `irods-server` package installed.
 - Network access from the iRODS server to the Postgres catalog
-  (see [`postgres.md`](./postgres.md)).
+  (see [`postgres.md`](./postgres.md)). Use Postgres here, not a
+  DuckDB-file catalog. The rule host runs one `record` process per
+  AVU event, possibly concurrently, and a DuckDB file allows only one
+  writer at a time (see [`duckdb-catalog.md`](./duckdb-catalog.md)).
 - A Python virtualenv reachable as `mesa-ducklake-record-cli` (or
   similar) on the iRODS server's PATH, with `mesa-ducklake`
   installed.
@@ -70,9 +81,10 @@ sudo -u irods which mesa-ducklake
 sudo -u irods bash -c 'echo "{}" | mesa-ducklake record; echo "exit: $?"'
 ```
 
-The last command should exit `1` with a "malformed input" message
-on stderr — proving the CLI is on `$PATH` and the DSN is being
-read.
+The last command should exit `1` with an `invalid_input` envelope
+(`missing required field: 'irods_path'`) on stderr. That proves the
+CLI is on `$PATH` and the DSN is being read. An exit of `3` means the
+DSN is not set in that environment.
 
 ## Installing the native iRL rule
 
@@ -179,9 +191,12 @@ LIMIT 5;
 SQL
 ```
 
-A new snapshot row should appear. Reading the corresponding
-Parquet file (in `/.mesa/ducklake/` inside the project) via
-`DuckLakeClient.get_history` will show the rule-sourced row with
+A new snapshot row should appear, with the note
+`add AVU via irods-rule:acPostProcForModifyAVUMetadata`. Its Parquet
+file is in the rule host's local cache, not in the project's
+`.mesa/ducklake/` collection (see the note above). Reading it with
+`DuckLakeClient.get_history` from that host, with the same cache
+directory, shows the rule-sourced row with
 `source = 'irods-rule:acPostProcForModifyAVUMetadata'`.
 
 ## Ticket provenance

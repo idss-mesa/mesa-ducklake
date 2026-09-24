@@ -1,0 +1,13 @@
+# LiteLLM proxy config for the local e2e stack (see docker-compose.yml).
+# The suite addresses the model by alias: LLM_MODEL=openai/e2e-tools.
+model_list:
+  - model_name: e2e-tools
+    litellm_params:
+      model: hosted_vllm/qwen3-8b
+      api_base: http://vllm:8000/v1
+      # e2e verdicts should not depend on sampling luck.
+      temperature: 0
+
+litellm_settings:
+  drop_params: true      # ignore OpenAI params vLLM does not implement
+  request_timeout: 600

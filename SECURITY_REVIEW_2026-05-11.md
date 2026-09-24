@@ -1,5 +1,25 @@
 # Security Review — 2026-05-11
 
+> **Status as of 2026-09-24.** This is a historical, point-in-time
+> review. The two items listed below under *Items observed but
+> excluded* are **still unaddressed**:
+>
+> - JSON escaping in `irods-rules/mesa_avu_change.re`;
+> - GenQuery interpolation in `irods-rules/mesa_enroll_policy.re`.
+>
+> Both are tracked in [`NEXT_STEPS.md`](NEXT_STEPS.md). Surfaces added
+> since this review have **not** been security-reviewed:
+>
+> - `src/mesa_ducklake/catalog_duckdb.py` (DuckDB-file catalog);
+> - `src/mesa_ducklake/irods_sync.py` (push/pull and recovery);
+> - `open_catalog` DSN dispatch in `src/mesa_ducklake/catalog.py`;
+> - the `recover` and `migrate` CLI verbs.
+>
+> See [`docs/dev/architecture-review-2026-09.md`](docs/dev/architecture-review-2026-09.md)
+> for the current architecture assessment. The commit and repository
+> names below (`cyverse/…`) are as they were at review time. The
+> repositories now live under `idss-mesa/`.
+
 Point-in-time review of the initial build of mesa-ducklake and the
 sibling mesa-mcp. Covers commits `cyverse/mesa-mcp@5b7a5da` and
 `cyverse/mesa-ducklake@896dce3`.

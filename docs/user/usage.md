@@ -3,7 +3,8 @@
 What this page covers: how to use `mesa_ducklake.DuckLakeClient` from
 Python. This is the only supported entry point of the library; every
 other module in `mesa_ducklake` is internal. Examples here mirror the
-shapes used by the sibling project `cyverse/mesa-mcp`.
+shapes used by the sibling project
+[`idss-mesa/mesa-mcp`](https://github.com/idss-mesa/mesa-mcp).
 
 ## Installation
 
@@ -15,8 +16,8 @@ pip install -e ".[dev]"
 ```
 
 Runtime dependencies (pulled automatically by `pip`):
-`duckdb>=1.1`, `psycopg[binary]>=3.2`, `pydantic>=2.6`,
-`python-irodsclient>=2.0`, `pytz`. Python 3.11 or newer is required.
+`duckdb>=1.1`, `platformdirs>=4.0`, `psycopg[binary]>=3.2`,
+`pydantic>=2.6`, `python-irodsclient>=2.0`, `pytz`. Python 3.11 or newer is required.
 
 ## Importing the public surface
 
@@ -33,11 +34,10 @@ notice.
 
 ## Instantiating the client
 
-`DuckLakeClient` needs a Postgres DSN for the catalog and an
-authenticated `python-irodsclient` session. In production the session
-is what gives the client access to write Parquet files into iRODS; in
-tests and local development you can pass any opaque object and use
-`lake_root_override` to point the lake at a local directory.
+`DuckLakeClient` takes a catalog DSN and, optionally, an authenticated
+`python-irodsclient` session. The session is what lets the client
+replicate each snapshot's Parquet file into the project's iRODS
+collection, and pull missing files back before a read.
 
 ```python
 from mesa_ducklake import DuckLakeClient
@@ -47,37 +47,70 @@ irods = iRODSSession(host="data.cyverse.org", port=1247,
                     user="alice", password="...", zone="iplant")
 
 with DuckLakeClient(
-    postgres_dsn="postgresql://mesa:mesa@localhost:5432/mesa_ducklake",
+    catalog_dsn="postgresql://mesa:mesa@localhost:5432/mesa_ducklake",
     irods_session=irods,
 ) as client:
     ...
 ```
 
-The client is a context manager; `__exit__` closes the Postgres
-connection. For tests or short-lived scripts you can also call
-`client.close()` directly.
+The client is a context manager, and `__exit__` closes the catalog
+connection. You can also call `client.close()` directly.
 
-The `lake_root_override` argument lets tests redirect every project's
-Parquet directory to a local path (typically `tmp_path`):
+### Constructor parameters
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `catalog_dsn` | required | Catalog DSN. The backend is picked from its form (next table). |
+| `irods_session` | `None` | Authenticated PRC session. With `None`, and no per-call `session=`, the client runs in **local-only mode**: no iRODS push or pull, and the local cache is the only copy of the Parquet files. |
+| `cache_dir` | `platformdirs.user_cache_dir("mesa-ducklake")` | Root of the local Parquet cache. Each project uses `<cache_dir>/<project_id>/`. |
+| `cache_cap_bytes` | `1 << 30` (1 GiB) | Soft cap on the cache. After each successful commit, files are evicted oldest-first by mtime until the total is under the cap. `0` disables eviction. |
+| `data_collection` | `None` → `.mesa/ducklake` | Sub-collection under each project root that holds the Parquet files. Applied **at registration time only** (see below). |
+| `postgres_dsn` | — | Deprecated alias for `catalog_dsn`. `catalog_dsn` wins if both are given. |
+| `lake_root_override` | — | Deprecated alias for `cache_dir`. It wins over `cache_dir` if both are given. |
+
+### Choosing a catalog backend
+
+| `catalog_dsn` | Backend | Use for |
+|---|---|---|
+| `postgresql://…`, `postgres://…`, or a libpq keyword DSN containing `host=` / `dbname=` | Postgres | Hosted and multi-writer deployments. Prepare the schema with `mesa-ducklake migrate`. |
+| `duckdb:///abs/path/catalog.duckdb` | DuckDB file | Single-user and local installs. No server needed. The schema is created on first open. **Single writer.** |
+| `something.duckdb`, `duckdb://relative.duckdb` | DuckDB file | As above, resolved relative to the current directory. Prefer an absolute path. |
+| `:memory:` | In-memory DuckDB | Tests and throwaway scripts. |
+
+A blank or unrecognized DSN raises `ValueError` on first use. The
+catalog is opened lazily, so construction alone does not connect. See
+[`../deploy/duckdb-catalog.md`](../deploy/duckdb-catalog.md) for the
+DuckDB backend's trade-offs.
+
+A local-only client with a DuckDB catalog needs no external services
+at all. This is handy for experiments:
 
 ```python
 with DuckLakeClient(
-    postgres_dsn=postgres_dsn,
-    irods_session=dummy_session,
-    lake_root_override="/tmp/mesa-lakes",
+    catalog_dsn="duckdb:///tmp/mesa-demo/catalog.duckdb",
+    cache_dir="/tmp/mesa-demo/cache",
+    cache_cap_bytes=0,          # local-only: the cache is the only copy
 ) as client:
     ...
 ```
 
-In production leave it `None`; the iRODS-backed `LakeStorage` will
-plug in when it lands (see
-[`../dev/architecture.md`](../dev/architecture.md)).
+### Per-call sessions
+
+Every write and read method accepts a keyword-only `session=`. A
+per-call session wins over the constructor's session, which lets a
+multi-user server such as mesa-mcp reuse one client with each
+caller's own iRODS session.
 
 ## Registering a project
 
 A MESA-enabled iRODS project must be registered in the catalog before
 any AVU changes can be recorded against it. The project's
-`ducklake_path` defaults to `<irods_path>/.mesa/ducklake`.
+`ducklake_path` is `<irods_path>/.mesa/ducklake`, or
+`<irods_path>/<data_collection>` when the client was built with
+`data_collection=`. The resolved path is stored on the project row,
+so changing `data_collection` later does not move or orphan an
+existing project's files. It affects only projects registered
+afterwards.
 
 ```python
 project = client.register_project(
@@ -92,8 +125,12 @@ project.status           # 'active'
 ```
 
 `register_project` inserts a row in `mesa.projects` and returns the
-`Project` model. The catalog enforces `UNIQUE(irods_path)`; registering
-the same path twice raises a `psycopg.errors.UniqueViolation`.
+`Project` model. The catalog enforces `UNIQUE(irods_path)`.
+Registering the same path twice raises a backend-specific error:
+`psycopg.errors.UniqueViolation` on Postgres, and
+`duckdb.ConstraintException` on a DuckDB-file catalog. To stay
+backend-agnostic, call `find_project_by_path` first rather than
+catching either exception.
 
 To look up an existing project:
 
@@ -129,7 +166,7 @@ snap = client.record_changes(
     note="Tagged file.csv with ENVO biome",
 )
 
-snap.snapshot_id      # int, monotonic per-project
+snap.snapshot_id      # int, monotonic across the whole catalog (not per project)
 snap.parquet_file     # 'snapshot_<id>.parquet'
 snap.parent_snapshot  # previous snapshot id for this project, or None
 ```
@@ -139,8 +176,10 @@ Rules:
 - The `changes` list must be non-empty — `record_changes` raises
   `ValueError` if it is. Empty snapshots are a bug, not a feature.
 - Every `AvuChange` must populate `attribute`, `value`, `target_type`,
-  `op`, and `actor`. `unit` defaults to `""` (matching iCAT semantics
-  for "no unit").
+  `op` and `actor`. `unit` defaults to `""`, which matches iCAT
+  semantics for "no unit".
+- Provenance is mandatory. An empty or whitespace-only `actor` or
+  `source` is rejected when the `AvuChange` is constructed.
 - `source` defaults to `"mesa-mcp"`. Set it to `"irods-rule:<event>"`
   for changes captured through a rule callback (see
   [`cli.md`](./cli.md)).
@@ -149,8 +188,31 @@ Rules:
   rewrite a Parquet file.
 - `project_id` and `snapshot_id` on the input `AvuChange` are ignored
   if set; `record_changes` stamps the correct values before writing.
-- If the Parquet write fails, the snapshot row is rolled back so the
-  catalog index does not dangle.
+- What happens on failure depends on the mode.
+  - With an iRODS session, the write is **push-before-commit**. The
+    snapshot row stays `'pending'`, invisible to reads, until the
+    Parquet is written locally *and* pushed to iRODS with a verified
+    checksum. If anything fails in between, the exception propagates
+    and a `mesa.pending_pushes` row remains so that recovery can finish
+    the job (see below).
+  - In local-only mode, a failed Parquet write deletes the snapshot
+    row so the catalog index does not dangle.
+
+### Crash recovery: `recover_pending_pushes`
+
+After a crash or an iRODS outage, drain the write-ahead log:
+
+```python
+summary = client.recover_pending_pushes(session=irods)   # or rely on the constructor's session
+# {"pushed": 1, "committed": 0, "failed": 0, "orphaned": 0, "missing_local": 0}
+```
+
+For each pending row, it re-pushes the local Parquet to iRODS and
+commits the snapshot. It also drops WAL rows that are already
+committed or orphaned. After `max_attempts` (default 5) failures, it
+marks the snapshot `parquet_file='failed'`. It raises `RuntimeError`
+when no session is available. The `mesa-ducklake recover` CLI verb
+does the same from the shell (see [`cli.md`](./cli.md)).
 
 ### Provenance fields: `via_ticket` and `rule_invocation`
 
@@ -242,7 +304,8 @@ for e in events:
 
 ## Snapshot listing and diff
 
-`list_snapshots` returns recent snapshots for a project, newest first:
+`list_snapshots` returns recent committed snapshots for a project,
+newest first. In-flight (`'pending'`) rows are excluded:
 
 ```python
 snaps = client.list_snapshots(project.project_id, limit=20)
@@ -275,8 +338,9 @@ range is always well-defined.
 
 ## See also
 
-- [CLI](./cli.md) — the `mesa-ducklake record` callback used by
-  iRODS rules.
+- [CLI](./cli.md) — `mesa-ducklake record`, `recover` and `migrate`.
+- [`../deploy/duckdb-catalog.md`](../deploy/duckdb-catalog.md) — the
+  DuckDB-file catalog backend.
 - [Time travel](./time-travel.md) — worked example of as-of-T reads.
 - [`../dev/schema.md`](../dev/schema.md) — column-by-column reference
   for the Pydantic models above.

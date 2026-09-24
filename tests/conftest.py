@@ -92,6 +92,16 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers",
         "requires_postgres: skip when no Postgres executable is reachable",
     )
+    config.addinivalue_line(
+        "markers",
+        "live_e2e: scripted mesa-mcp e2e against live iRODS/OLS; skips unless "
+        "MESA_E2E_IRODS_ROOT is set (see docs/dev/llm-e2e-tests.md)",
+    )
+    config.addinivalue_line(
+        "markers",
+        "llm_e2e: LLM-driven mesa-mcp e2e; additionally needs LLM_MODEL "
+        "(see docs/dev/llm-e2e-tests.md)",
+    )
 
 
 def pytest_collection_modifyitems(
