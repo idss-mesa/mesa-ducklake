@@ -1,9 +1,19 @@
 # DuckDB catalog backend for mesa-ducklake
 
-- **Status:** Approved (design)
+- **Status:** Implemented (see implementation drift below)
 - **Date:** 2026-06-07
 - **Author:** tswetnam (with Claude Code)
 - **Scope:** mesa-ducklake (library); one-line touch in mesa-mcp
+
+> **Implementation drift (noted 2026-09-24).** The shipped
+> `DuckDBCatalogStore` stores `project_id` as `TEXT` (the UUID string form,
+> generated in Python with `uuid4()`), not `UUID DEFAULT uuid()` as proposed
+> below. This matches how the Parquet data plane stores `project_id` and
+> avoids UUID parameter-binding edge cases; Pydantic coerces the string back
+> to `uuid.UUID`. The DuckDB schema also has no `mesa.schema_versions` table:
+> it is bootstrapped inline by `_SCHEMA_STATEMENTS` in
+> `src/mesa_ducklake/catalog_duckdb.py`. The implementation plan is in
+> [`plans/2026-06-07-duckdb-catalog-backend.md`](plans/2026-06-07-duckdb-catalog-backend.md).
 
 ## Context & problem
 

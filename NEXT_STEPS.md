@@ -1,112 +1,118 @@
-# mesa-ducklake — Where we left off
+# mesa-ducklake: status and next steps
 
-Snapshot of state and outstanding work, written so a future-you can
-pick this up cold.
+A current-status page: what works, what is known to be open, and what
+comes next. It carries no host names, credentials or machine-specific
+paths. Deployment details belong in `docs/deploy/` and in your own ops
+notes. Last reviewed 2026-09-24.
 
-## What's live
+## Done
 
-**Postgres catalog** — `mesa_ducklake` database on
-`mesa-mcp.cis240692.projects.jetstream-cloud.org` (Postgres 16, local
-socket only). Owned by role `mesa`; password at
-`/etc/mesa-mcp/secrets/postgres_password` (root:exouser, 0640).
+- **`DuckLakeClient` API** (the only public surface):
+  `register_project`, `get_project`, `find_project_by_path`,
+  `record_changes`, `get_avus`, `get_avus_as_of`, `get_history`,
+  `list_snapshots`, `diff` and `recover_pending_pushes`. Reads and
+  writes accept a per-call `session=`. See
+  [`docs/user/usage.md`](docs/user/usage.md).
+- **Two catalog backends behind the `CatalogStore` Protocol.**
+  Postgres (numbered migrations `0001`, `0002`) and a single-writer
+  DuckDB file (inline schema bootstrap). The backend is selected from
+  the DSN by `open_catalog`. See
+  [`docs/deploy/duckdb-catalog.md`](docs/deploy/duckdb-catalog.md).
+- **iRODS sync sidecar with push-before-commit.** Snapshot rows start
+  `'pending'`, the `mesa.pending_pushes` WAL row covers crashes, the
+  Parquet push is checksum-verified, and the catalog flip is the
+  commit point.
+- **Local Parquet cache** under `platformdirs.user_cache_dir`, with
+  LRU-by-mtime eviction (`cache_cap_bytes`).
+- **Configurable Parquet sub-collection** (`data_collection`), fixed
+  per project at registration.
+- **CLI** `mesa-ducklake record | recover | migrate`, which accepts
+  Postgres or DuckDB DSNs. See [`docs/user/cli.md`](docs/user/cli.md).
+- **Catalog backup**: a daily `pg_dump`-to-iRODS systemd timer, plus a
+  documented recovery procedure. See
+  [`docs/deploy/backup.md`](docs/deploy/backup.md).
+- **iRODS rule files** in [`irods-rules/`](irods-rules/). They are
+  written but not deployed (see below).
+- **CI** runs the Postgres-backed tests against a service container.
+- **Claude Code agents and skills** in [`.claude/`](.claude/), and a
+  vendor-neutral [`AGENTS.md`](AGENTS.md).
 
-**Schema state** — `mesa.projects`, `mesa.snapshots`,
-`mesa.schema_versions` tables present. `0001_initial.sql` applied
-and recorded.
+## Open issues
 
-**Tests** — 65 pass (44 unit + 21 requires_postgres against the
-pytest-postgresql ephemeral instance). Ruff clean. CLI installed:
-`.venv/bin/mesa-ducklake` (entry point `mesa_ducklake.cli:_console_main`).
+- **iRODS rule deployment on production.** The rule callbacks
+  (`mesa_avu_change.re` / `.py`, `mesa_enroll_policy.re`) have not been
+  installed on a production iRODS server. Until they are, AVU changes
+  made outside mesa-mcp are not recorded: `imeta`, `irods-mcp-server`,
+  the esiil-portal UI, and ticket sessions that bypass mesa-mcp. See
+  [`docs/deploy/irods-rules.md`](docs/deploy/irods-rules.md).
+- **`record` does not push to iRODS.** The CLI builds its client with
+  `irods_session=None`, so rule-captured snapshots are committed in
+  the catalog, but their Parquet stays in the rule host's local cache.
+  A read from any other host cannot pull it, and eviction on the rule
+  host can delete it. This must be fixed before rule deployment is
+  useful. Options include giving `record` an iRODS session, or
+  writing a WAL row so that `recover` pushes the file later.
+- **Security-review leftovers in the `.re` rules.** Two items were
+  excluded from the 2026-05-11 review and are still unaddressed (see
+  [`SECURITY_REVIEW_2026-05-11.md`](SECURITY_REVIEW_2026-05-11.md)):
+  - `mesa_avu_change.re` builds the stdin JSON with raw `msiStrCat`
+    and does no JSON escaping of AVU strings. A `"` or `\` in an
+    attribute, value or unit corrupts or reshapes the payload.
+  - `mesa_enroll_policy.re` interpolates `*parent` into a GenQuery
+    string without escaping (GenQuery injection).
+- **Newer surfaces not security-reviewed**: `catalog_duckdb.py`,
+  `irods_sync.py`, `open_catalog`, and the CLI `recover` / `migrate`
+  verbs. See
+  [`docs/dev/architecture-review-2026-09.md`](docs/dev/architecture-review-2026-09.md).
+- **Checksum verification can pass vacuously.** `irods_sync` treats an
+  empty server checksum, or one with an unknown algorithm, as a match.
+  On a zone that never computes checksums, pushes are effectively
+  unverified. Enable server-side checksums until this is fixed
+  (review item D4).
+- **Delete/unit mismatch gotcha.** Effective AVUs are computed by
+  partitioning on the full `(attribute, value, unit)` triple. A
+  `delete` whose `unit` differs from the unit of the original `add`
+  does not supersede that add, so the AVU still looks set. Examples
+  are `""` versus an ontology CURIE, or a client that drops the unit
+  on removal. This is correct per the canonical-triple contract, but
+  callers (mesa-mcp, the rules) must send the exact stored unit on
+  delete. Consider a warning or a lookup helper.
+- **Move/rename loses AVU history continuity.** History is keyed by
+  `irods_path`. When a data object or collection is moved or renamed
+  in iRODS, the new path starts with an empty history, and the old
+  path's history is orphaned. Needs a design: a rename event, a path
+  alias table, or a rule hook on `acPostProcForObjRename`.
+- **`'failed'` snapshots are visible in `list_snapshots`.** Rows that
+  recovery gives up on are filtered only from AVU reads, because they
+  have no file. `list_snapshots` and `latest_snapshot_id` filter only
+  `'pending'`, so a `failed` snapshot can become the next snapshot's
+  `parent_snapshot`.
+- **Live LLM e2e runs.** The `live_e2e` / `llm_e2e` tiers under
+  `tests/llm_e2e/` exist, but they need real iRODS and LLM endpoints
+  and have not been run on a schedule. See
+  [`docs/dev/llm-e2e-tests.md`](docs/dev/llm-e2e-tests.md).
 
-## What's NOT done yet
+## Next
 
-**iRODS rule callback installation.** [`irods-rules/`](irods-rules/) contains:
-
-- `mesa_avu_change.re` — iRL rule for `acPostProcForModifyAVUMetadata`.
-- `mesa_avu_change.py` — Python Rule Engine equivalent.
-- `mesa_enroll_policy.re` — auto-enrolls new collections under a
-  parent that has `mesa.auto_enroll=true`.
-
-These need to be installed on the CyVerse iRODS server (not this VM —
-this VM is the *client*) by an iRODS admin. Until then, AVU writes
-made directly via `imeta` or other clients won't reach mesa-ducklake.
-
-See [`docs/deploy/irods-rules.md`](docs/deploy/irods-rules.md) for the
-admin install steps and `irule -F` testing.
-
-**No real-world data yet.** No project has been registered via
-`DuckLakeClient.register_project`. To smoke-test the catalog end-to-end:
-
-```bash
-cd /home/exouser/mesa-ducklake
-PG_PASSWORD=$(sudo cat /etc/mesa-mcp/secrets/postgres_password)
-.venv/bin/python <<PY
-from mesa_ducklake import DuckLakeClient, AvuChange
-client = DuckLakeClient(
-    postgres_dsn=f"postgresql://mesa:{'$PG_PASSWORD'}@127.0.0.1:5432/mesa_ducklake",
-    irods_session=None,           # not used for these calls
-)
-project = client.register_project(
-    irods_path="/iplant/home/tswetnam/mesa-smoke",
-    actor="tswetnam",
-    zone="iplant",
-)
-print("registered:", project)
-PY
-```
-
-(Once mesa-mcp tools are routing AVU writes through DuckLake, this
-happens automatically on first write to a MESA-enabled project.)
-
-## To finish the rule-callback path (when ready)
-
-1. Build a test iRODS server (Docker image of `cyverse/iRODS-runner` or
-   similar) for local validation.
-2. Drop `irods-rules/mesa_avu_change.re` into `/etc/irods/` on the test
-   server. Register in `server_config.json` per the README in that dir.
-3. From inside the iRODS container:
-   ```bash
-   irule -F /etc/irods/mesa_avu_change_smoke.r '*path="/tempZone/home/rods/file.txt"' '*attr=k' '*value=v' '*unit='
-   ```
-4. Confirm the change lands in `mesa_ducklake` via the catalog query.
-5. When happy, coordinate with CyVerse ops to deploy on production iRODS.
-
-## Other follow-ups
-
-- **iRODS-backed `LakeStorage` implementation.** The Protocol seam is
-  in [`src/mesa_ducklake/lake.py`](src/mesa_ducklake/lake.py); today
-  only `LocalLakeStorage` exists (writes Parquet to a local
-  filesystem path). Add an `iRODSLakeStorage` that writes Parquet
-  blobs to `<project_root>/.mesa/ducklake/` via `python-irodsclient`.
-  That is the "metadata travels with the data" promise from
-  `CLAUDE.md` — currently the local filesystem stands in.
-- **Schema version 0002**, if it becomes needed (e.g., adding a column
-  to `mesa.snapshots`). Numbering and append-only rules in
-  [`docs/dev/adding-migrations.md`](docs/dev/adding-migrations.md).
-- **Production retention policy.** Today nothing prunes old Parquet
-  files. Per `docs/deploy/per-project-storage.md`, ~1KB per AVU
-  change; small projects won't notice, large ones eventually will.
+1. Close the `record`-does-not-push gap, then fix JSON escaping and
+   GenQuery escaping in the `.re` rules.
+2. Validate the rules on a disposable iRODS server: install, fire
+   `irule -F`, confirm the catalog row and the Parquet in iRODS. Then
+   coordinate a production deployment with the iRODS admins.
+3. **Snapshot compaction.** Consolidate a project's many small
+   per-snapshot Parquet files. Reads cap `ensure_cached` at 1000
+   snapshots per project today.
+4. **Postgres WAL shipping to iRODS** (`archive_command`) for
+   sub-minute catalog RPO, beyond the daily `pg_dump`.
+5. A design for move/rename history continuity.
+6. `mesa-ducklake fsck` to reconcile `.mesa/ducklake/` contents with
+   `mesa.snapshots` after a restore (see `docs/deploy/backup.md`).
+7. A regular schedule for the live and LLM e2e tiers, with results
+   triaged by the `llm-e2e-triage` agent.
 
 ## Pointers
 
-- Architecture & contracts: [`CLAUDE.md`](CLAUDE.md).
+- Architecture and contracts: [`CLAUDE.md`](CLAUDE.md), and
+  [`AGENTS.md`](AGENTS.md) for other agents.
 - Docs entry: [`docs/README.md`](docs/README.md).
-- The companion server: [`/home/exouser/mesa-mcp/`](../mesa-mcp/) — see
-  its `NEXT_STEPS.md` for the OIDC / iRODS-account follow-ups.
-
-## Quick commands
-
-```bash
-# Run the test suite
-cd /home/exouser/mesa-ducklake
-.venv/bin/pytest -q                 # 65 pass
-
-# Inspect the live catalog
-PGPASSWORD=$(sudo cat /etc/mesa-mcp/secrets/postgres_password) \
-    psql -h 127.0.0.1 -U mesa -d mesa_ducklake -c 'SELECT * FROM mesa.schema_versions;'
-
-# Run the CLI manually with a sample change
-PG_PASSWORD=$(sudo cat /etc/mesa-mcp/secrets/postgres_password)
-MESA_DUCKLAKE_DSN="postgresql://mesa:${PG_PASSWORD}@127.0.0.1:5432/mesa_ducklake" \
-    .venv/bin/mesa-ducklake record < some-change.json
-```
+- Companion server: [idss-mesa/mesa-mcp](https://github.com/idss-mesa/mesa-mcp).

@@ -1,6 +1,6 @@
 # DuckDB Catalog Backend Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Status:** implemented (see git log for the catalog_duckdb/open_catalog commits); checkboxes below are historical and not maintained.
 
 **Goal:** Let mesa-ducklake's catalog run on a self-contained local DuckDB file instead of Postgres, selected automatically from the existing `catalog_dsn`, so single-user/local installs get AVU history with zero external database.
 
@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.11, DuckDB 1.5.3 (sequences + `RETURNING` + `now()`/`nextval` defaults, `UNIQUE` → `duckdb.ConstraintException`), Pydantic v2, pytest, uv-managed venv at `/Users/tswetnam/Desktop/mesa-ai-test/.venv`.
 
-**Spec:** `mesa-ducklake/docs/superpowers/specs/2026-06-07-duckdb-catalog-backend-design.md`
+**Spec:** [`../2026-06-07-duckdb-catalog-backend-design.md`](../2026-06-07-duckdb-catalog-backend-design.md)
 
 **Conventions for every command below:**
 - `PY=/Users/tswetnam/Desktop/mesa-ai-test/.venv/bin/python`

@@ -1,183 +1,283 @@
-# CLI — `mesa-ducklake record`
+# CLI: `mesa-ducklake`
 
-What this page covers: the `mesa-ducklake record` command-line tool
-used by iRODS rule callbacks (and any other non-Python caller) to
-forward AVU change events into mesa-ducklake. The CLI is the only
-sanctioned non-Python interface to the library — everything else uses
-`DuckLakeClient` directly.
+What this page covers: the `mesa-ducklake` command-line tool and its
+three verbs:
 
-> **Status: in progress.** The CLI itself is being added in parallel
-> (`src/mesa_ducklake/cli.py`, exposed via `[project.scripts]` in
-> `pyproject.toml`) by a sibling agent. This page documents the
-> intended surface per
-> [`../../CLAUDE.md`](../../CLAUDE.md) section
-> *"iRODS rules, policies, and tickets integration"*. The contract
-> below is what the rule callbacks in
-> [`../deploy/irods-rules.md`](../deploy/irods-rules.md) will rely
-> on.
+- `record` forwards one AVU change from an iRODS rule callback, or any
+  other non-Python caller.
+- `recover` drains the crash-recovery write-ahead log.
+- `migrate` prepares the catalog schema.
 
-## When to use the CLI
-
-You only call the CLI directly if you are an iRODS rule or another
-non-Python process that observed an AVU change and needs to record
-it in mesa-ducklake. Library users should use
-`DuckLakeClient.record_changes` from Python (see
+The CLI is the only sanctioned non-Python interface to the library.
+Everything else uses `DuckLakeClient` directly (see
 [`usage.md`](./usage.md)).
 
-The typical caller chain is:
+The implementation is in
+[`../../src/mesa_ducklake/cli.py`](../../src/mesa_ducklake/cli.py).
+Its module docstring is the canonical wire contract.
 
-```
-iRODS server fires acPostProcForModifyAVUMetadata
-   -> mesa_avu_change.re   (iRODS native rule)
-        -> shells out to:   mesa-ducklake record
-              -> reads JSON from stdin
-              -> writes one snapshot via DuckLakeClient.record_changes
-              -> exits 0 on success
-```
-
-This catches AVU changes made by `imeta`, `irods-mcp-server`, the
-esiil-portal UI, or any other client — anything mesa-mcp does not
-touch directly.
-
-## Invocation
+## Synopsis
 
 ```bash
-mesa-ducklake record
+mesa-ducklake [record]                 # JSON on stdin; "record" is the default verb
+mesa-ducklake recover                  # no stdin
+mesa-ducklake migrate [--target N]     # no stdin
 ```
 
-The command takes no positional arguments. It reads its payload from
-**stdin** as JSON and emits human-readable status to stderr. Stdout
-is reserved for machine-readable result data (currently the assigned
-`snapshot_id` on success).
+There is no `--help` flag. Any first argument other than `record`,
+`recover` or `migrate` is rejected with `unknown_verb` (exit 1).
+
+When no verb is given, the CLI runs `record`. This keeps the iRODS rule
+callback, which runs plain `mesa-ducklake`, working.
 
 ## Configuration
 
-The CLI reads its Postgres DSN from the environment:
+Every verb reads the catalog DSN from the environment:
 
 ```
-MESA_DUCKLAKE_DSN   libpq DSN for the catalog database, required.
+MESA_DUCKLAKE_DSN   catalog DSN, required
 ```
 
-Example:
+The backend is chosen from the DSN, as with `DuckLakeClient(catalog_dsn=...)`:
+
+| DSN form | Backend |
+|---|---|
+| `postgresql://…` or `postgres://…` | Postgres |
+| libpq keyword DSN containing `host=` or `dbname=` | Postgres |
+| `duckdb:///abs/path/catalog.duckdb` | DuckDB file (recommended form: absolute path) |
+| `duckdb://relative.duckdb`, `something.duckdb`, `:memory:` | DuckDB file, resolved relative to the CWD (or in-memory) |
 
 ```bash
 export MESA_DUCKLAKE_DSN="postgresql://mesa:mesa@localhost:5432/mesa_ducklake"
+# or, for a single-user local install:
+export MESA_DUCKLAKE_DSN="duckdb:///home/alice/.local/share/mesa/catalog.duckdb"
 ```
 
-If `MESA_DUCKLAKE_DSN` is unset, the CLI exits with code 3 (see
-[Exit codes](#exit-codes)).
+If `MESA_DUCKLAKE_DSN` is unset or empty, every verb exits with code 3
+before doing anything else.
 
-The CLI does **not** read `config.yaml.example`; that file is only a
-hint for human operators. It also does not open an iRODS session of
-its own — the rule callback that invokes it has already validated
-that the user is permitted to change the metadata; the CLI's job is
-recording, not authorization.
+A DuckDB-file catalog is **single-writer**: only one OS process can
+hold the file at a time. This fits a local install where the same
+process both writes and reads. It is a poor fit for the rule-callback
+path, where `record` runs on the iRODS server host once per AVU event,
+possibly concurrently. Use Postgres there. See
+[`../deploy/duckdb-catalog.md`](../deploy/duckdb-catalog.md).
 
-## Stdin JSON contract
+The CLI does not read `config.yaml.example`, which is only a hint for
+human operators.
 
-The CLI accepts a single JSON object on stdin. The schema mirrors the
-arguments to `DuckLakeClient.record_changes` plus the project lookup
-needed to resolve `project_id` from `irods_path`.
+Handled errors are written to **stderr** as a single-line JSON envelope
+(see the known gap under [Exit codes](#exit-codes)):
+
+```json
+{"code": "invalid_input", "message": "missing required field: 'attribute'"}
+```
+
+On success, the result is written to **stdout** as one JSON object.
+
+## `record`: the rule-callback path
+
+`record` is meant for iRODS rules and other non-Python processes
+that observed an AVU change and need to record it. Library users
+should call `DuckLakeClient.record_changes` from Python instead.
+
+```
+iRODS server fires acPostProcForModifyAVUMetadata
+   -> mesa_avu_change.re / mesa_avu_change.py
+        -> runs: mesa-ducklake record   (JSON on stdin)
+              -> resolves the project
+              -> writes one snapshot (one AVU change) via DuckLakeClient.record_changes
+              -> prints the result on stdout, exits 0
+```
+
+This catches AVU changes made by `imeta`, `irods-mcp-server`, the
+esiil-portal UI, or any other client that bypasses mesa-mcp.
+
+### Stdin: one flat JSON object
+
+`record` reads **one AVU change** per invocation, as a single flat JSON
+object:
 
 ```json
 {
-  "irods_path": "/iplant/home/alice/myproj",
+  "irods_path": "/iplant/home/alice/myproj/file.csv",
+  "target_type": "data_object",
+  "attribute": "envo.biome",
+  "value": "tropical moist broadleaf forest",
+  "unit": "ENVO:01000228",
+  "op": "add",
   "actor": "alice",
-  "note": "imeta add via rule",
-  "changes": [
-    {
-      "irods_path": "/iplant/home/alice/myproj/file.csv",
-      "target_type": "data_object",
-      "attribute": "envo.biome",
-      "value": "tropical moist broadleaf forest",
-      "unit": "ENVO:00000428",
-      "op": "add",
-      "actor": "alice",
-      "source": "irods-rule:acPostProcForModifyAVUMetadata",
-      "via_ticket": null,
-      "rule_invocation": "mesa_avu_change"
-    }
-  ]
+  "source": "irods-rule:acPostProcForModifyAVUMetadata",
+  "rule_invocation": "mesa_avu_change",
+  "via_ticket": null,
+  "ts": "2026-09-24T17:02:11Z"
 }
 ```
 
-Field semantics:
-
 | Field | Required | Notes |
 |---|---|---|
-| `irods_path` (top-level) | yes | Project root, used to resolve `project_id`. Must be a MESA-enabled project; otherwise exit code 2. |
-| `actor` (top-level) | yes | iRODS user who triggered the change; recorded on the snapshot row. |
-| `note` (top-level) | no | Optional human-readable commit message. |
-| `changes` | yes, non-empty | List of AVU change objects matching the `AvuChange` Pydantic model (see [`../dev/schema.md`](../dev/schema.md)). |
-| `changes[].irods_path` | yes | Full iRODS path the AVU is bound to (may be a child of the project root). |
-| `changes[].target_type` | yes | One of `data_object`, `collection`, `resource`, `user`. |
-| `changes[].attribute` / `value` / `unit` | yes / yes / no | Canonical AVU triple. `unit` defaults to `""`. |
-| `changes[].op` | yes | `"add"` or `"delete"`. |
-| `changes[].actor` | yes | Per-row actor (usually identical to the top-level `actor`). |
-| `changes[].source` | yes | Conventionally `"irods-rule:<event>"` when emitted by a rule. |
-| `changes[].via_ticket` | no | iRODS ticket id when the session used a ticket; the rule reads `$ticketUserName`. |
-| `changes[].rule_invocation` | no | Name of the iRODS rule that emitted the change (e.g. `"mesa_avu_change"`). |
+| `irods_path` | yes | Full iRODS path the AVU is bound to. Without `project_id`, the CLI walks up this path's parents until it finds a registered project root. |
+| `target_type` | yes | `data_object`, `collection`, `resource` or `user`. |
+| `attribute` | yes | The A of the canonical AVU triple. |
+| `value` | yes | The V. |
+| `unit` | no | The U. A missing value or `null` becomes `""`, which matches iCAT. |
+| `op` | yes | `"add"` or `"delete"`. |
+| `actor` | yes | iRODS user who made the change. Must not be empty or whitespace (rejected at the model layer). |
+| `source` | no | Provenance. Conventionally `"irods-rule:<event>"`. A missing or empty value becomes `"mesa-ducklake-cli"`. A whitespace-only value is rejected. |
+| `project_id` | no | UUID of the project. When present, it skips the path walk. An unknown id fails with `unknown_project`. |
+| `ts` | no | RFC 3339 timestamp (a trailing `Z` is accepted). Defaults to now (UTC). |
+| `via_ticket` | no | Ticket id when the change went through an iRODS ticket. Empty becomes `null`. |
+| `rule_invocation` | no | Name of the rule that emitted the change, e.g. `"mesa_avu_change"`. Empty becomes `null`. |
 
-## Stdout on success
+Keys not in this table are ignored. There is no `note` field: the
+snapshot note is generated as `"<op> AVU via <source>"`. Each
+invocation creates exactly one snapshot holding one AVU change.
 
-A single JSON object describing the created snapshot is written to
-stdout:
+### Stdout on success
 
 ```json
-{"snapshot_id": 42, "parquet_file": "snapshot_42.parquet"}
+{"snapshot_id": 42, "parquet_file": "snapshot_42.parquet", "project_id": "6f1c…"}
 ```
 
-iRODS rules typically ignore stdout and rely on the exit code.
+iRODS rules usually ignore stdout and rely on the exit code.
+
+### What `record` does not do
+
+`record` never opens an iRODS session. It builds its client with
+`irods_session=None`, so the write takes the **local-only** path:
+
+- The Parquet file is written to the local cache of the host running
+  the CLI (`platformdirs.user_cache_dir("mesa-ducklake")`, usually the
+  `irods` service account's cache).
+- The file is **not** pushed to `<project>/.mesa/ducklake/` in iRODS,
+  and no `mesa.pending_pushes` row is created.
+
+As a result, a later session-backed read from another host sees the
+catalog row but cannot pull that Parquet from iRODS. Cache eviction on
+the rule host can also remove the only copy. Until `record` gains an
+iRODS push, treat rule-captured history as local to the rule host.
+This is tracked in [`../../NEXT_STEPS.md`](../../NEXT_STEPS.md).
+
+The CLI also does not authorize anything. The rule callback that
+invokes it runs after iRODS has already allowed the metadata change;
+the CLI's job is only to record it.
+
+## `recover`: drain the write-ahead log
+
+```bash
+mesa-ducklake recover
+```
+
+`recover` takes no stdin. It opens an iRODS session from
+`IRODS_ENVIRONMENT_FILE`, or from `~/.irods/irods_environment.json`
+when that is unset. It then calls
+`DuckLakeClient.recover_pending_pushes()`, which drains up to 100 rows
+of `mesa.pending_pushes`. For each row it either re-pushes the Parquet
+to iRODS and commits, drops an orphaned or already-committed row, or
+marks the snapshot `failed` after `DEFAULT_MAX_ATTEMPTS` (5) attempts.
+[`../dev/architecture.md`](../dev/architecture.md#crash-recovery)
+describes the algorithm.
+
+Run it on service start, after an iRODS outage, and after restoring
+the catalog from backup (see [`../deploy/backup.md`](../deploy/backup.md)).
+
+Stdout on success is a counter summary:
+
+```json
+{"pushed": 1, "committed": 1, "failed": 0, "orphaned": 0, "missing_local": 0}
+```
+
+## `migrate`: prepare the catalog schema
+
+```bash
+mesa-ducklake migrate              # apply every pending migration
+mesa-ducklake migrate --target 1   # stop after migration 0001 (Postgres only)
+```
+
+- **Postgres:** applies every pending `migrations/NNNN_*.sql` file in
+  order and records each one in `mesa.schema_versions`. `--target N`
+  is an inclusive upper bound. The command is idempotent; re-running
+  reports `applied: 0`.
+
+  ```json
+  {"applied": 2, "target": null, "backend": "postgres"}
+  ```
+
+- **DuckDB file:** there is no migration history. The DuckDB backend
+  creates its schema when the file is opened. `migrate` opens the
+  file, which creates it and its parent directories if needed, runs
+  the idempotent bootstrap, closes it, and reports zero migrations
+  applied. `target` echoes whatever `--target` value was passed.
+
+  ```json
+  {"applied": 0, "target": null, "backend": "duckdb"}
+  ```
+
+`--target` must be followed by an integer. Anything else is
+`invalid_input` (exit 1). A migration error is `migration_failed`
+(exit 2), and the failing migration is rolled back.
 
 ## Exit codes
 
-| Code | Meaning |
-|---|---|
-| 0 | Success. Snapshot was recorded. |
-| 1 | Generic error: malformed JSON, validation failure on an `AvuChange`, Postgres or Parquet write failure. Stderr contains the message. |
-| 2 | The project at the given `irods_path` is not MESA-enabled (not registered, or its root collection lacks `mesa.enabled=true`). The rule callback should swallow this so non-MESA traffic is not blocked. |
-| 3 | The `MESA_DUCKLAKE_DSN` environment variable is missing. Operator error. |
+| Code | Verb | `code` in stderr | Meaning |
+|---|---|---|---|
+| 0 | all | none | Success. |
+| 1 | any | `unknown_verb` | First argument is not `record`, `recover` or `migrate`. |
+| 1 | `record` | `invalid_input` | Empty stdin, non-object JSON, a missing required field, bad `ts`, bad `project_id`, or model validation failure (for example empty `actor`, bad `op` or `target_type`). |
+| 1 | `record` | `catalog_unreachable` | The catalog client could not be constructed. In practice this rarely fires, because the catalog is opened lazily; see the note below. |
+| 1 | `record` | `unknown_project` | `project_id` was given but is not in the catalog. |
+| 1 | `record` | `record_failed` | The catalog or Parquet write failed. |
+| 1 | `recover` | `irods_env_missing` | The iRODS environment file is not readable. |
+| 1 | `recover` | `recover_failed` | Any other failure while draining. |
+| 1 | `migrate` | `invalid_input` | Bad `--target` usage. |
+| 2 | `record` | `not_mesa_enabled` | No registered project covers `irods_path`. Rule callbacks should treat this as "not for us" and skip it silently. |
+| 2 | `migrate` | `migration_failed` | A migration (or the DuckDB bootstrap) raised an error. |
+| 3 | all | `missing_dsn` | `MESA_DUCKLAKE_DSN` is unset or empty. Operator error. |
 
-The split between 1 and 2 lets rule callbacks distinguish "this AVU
-change isn't for us" (code 2 — silently skip) from "we tried to
-record it and something broke" (code 1 — log and alert).
+**Known gap:** in `record`, an error while *opening* the catalog (a
+Postgres outage, or a DuckDB file locked by another process) happens
+during project lookup and is not caught. The process exits 1 with a
+Python traceback on stderr instead of a JSON envelope.
+
+For `record`, the split between 1 and 2 lets a rule tell "this AVU
+change isn't for us" (2: skip) apart from "we tried to record it and
+something broke" (1: log and alert).
 
 ## Minimal example
 
 ```bash
 export MESA_DUCKLAKE_DSN="postgresql://mesa@/mesa_ducklake"
 
+mesa-ducklake migrate
+
 cat <<'EOF' | mesa-ducklake record
 {
-  "irods_path": "/iplant/home/alice/myproj",
+  "irods_path": "/iplant/home/alice/myproj/file.csv",
+  "target_type": "data_object",
+  "attribute": "envo.biome",
+  "value": "tropical moist broadleaf forest",
+  "unit": "ENVO:01000228",
+  "op": "add",
   "actor": "alice",
-  "note": "imeta add via rule",
-  "changes": [
-    {
-      "irods_path": "/iplant/home/alice/myproj/file.csv",
-      "target_type": "data_object",
-      "attribute": "envo.biome",
-      "value": "tropical moist broadleaf forest",
-      "unit": "ENVO:00000428",
-      "op": "add",
-      "actor": "alice",
-      "source": "irods-rule:acPostProcForModifyAVUMetadata",
-      "rule_invocation": "mesa_avu_change"
-    }
-  ]
+  "source": "irods-rule:acPostProcForModifyAVUMetadata",
+  "rule_invocation": "mesa_avu_change"
 }
 EOF
-
 echo "exit: $?"
 ```
 
+The project root, `/iplant/home/alice/myproj`, must already be
+registered (by mesa-mcp's `mesa_ducklake_init_project` or by
+`DuckLakeClient.register_project`). Otherwise the command exits 2.
+
 ## See also
 
-- [Usage](./usage.md) — the equivalent Python API for in-process
+- [Usage](./usage.md): the equivalent Python API for in-process
   callers.
-- [`../deploy/irods-rules.md`](../deploy/irods-rules.md) — installing
-  the rule that invokes this CLI on an iRODS server.
-- [`../dev/schema.md`](../dev/schema.md) — the underlying `AvuChange`
-  model the JSON payload maps onto.
-- [`../../CLAUDE.md`](../../CLAUDE.md) — section *"iRODS rules,
-  policies, and tickets integration"* for the design rationale.
+- [`../deploy/irods-rules.md`](../deploy/irods-rules.md): installing
+  the rules that invoke `record`.
+- [`../deploy/postgres.md`](../deploy/postgres.md) and
+  [`../deploy/duckdb-catalog.md`](../deploy/duckdb-catalog.md):
+  running `migrate` against each backend.
+- [`../dev/schema.md`](../dev/schema.md): the `AvuChange` model that
+  the JSON payload maps onto.

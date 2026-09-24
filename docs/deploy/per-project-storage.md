@@ -1,7 +1,7 @@
 # Per-project storage
 
-What this page covers: the on-disk layout of each project's
-DuckLake under `<project_root>/.mesa/ducklake/`, the access
+What this page covers: the layout of each project's DuckLake under
+`<project_root>/.mesa/ducklake/` (the default sub-collection), the access
 controls expected on that subcollection, capacity expectations,
 and the (currently nonexistent) pruning policy. This is the bulk
 of mesa-ducklake's data — the Postgres catalog is small, but the
@@ -37,10 +37,11 @@ at:
 
 Naming rules:
 
-- The subdirectory is **always** `.mesa/ducklake/` relative to
-  the project root. The path math is in
+- The sub-collection is `.mesa/ducklake/` relative to the project
+  root by default. The path math is in
   [`../../src/mesa_ducklake/irods_path.py`](../../src/mesa_ducklake/irods_path.py)
-  (`ducklake_subpath`).
+  (`ducklake_subpath`, `DEFAULT_DATA_COLLECTION`). See
+  [Configuring the sub-collection](#configuring-the-sub-collection).
 - Each file is **always** `snapshot_<id>.parquet`. The `<id>` is
   the `snapshot_id` from `mesa.snapshots`. Names are stable
   forever once written; the library never renames.
@@ -50,9 +51,40 @@ Naming rules:
   `mesa.projects.ducklake_path`.
 
 There is no manifest, index, or "current snapshot" pointer file.
-The set of `snapshot_*.parquet` files in the directory is the
-authoritative state; `LakeStore._open_read_con` discovers them
-via a directory glob (`existing_parquet_files`).
+The catalog's committed `mesa.snapshots` rows say which files belong
+to the project. Before a read, `irods_sync.ensure_cached` pulls any
+of those files that are missing into the local cache
+(`<cache_dir>/<project_id>/`). `LakeStore` then reads every
+`snapshot_*.parquet` it finds in that cache directory
+(`existing_parquet_files`).
+
+## Configuring the sub-collection
+
+The sub-collection name is configurable per client:
+
+```python
+DuckLakeClient(catalog_dsn=..., irods_session=..., data_collection="_history")
+# new projects get <project_root>/_history
+```
+
+mesa-mcp exposes this setting as `ducklake.data_collection` in its
+config (default `.mesa/ducklake`). It forwards non-default values to
+mesa-ducklake versions that accept the parameter.
+
+The setting applies **only when a project is registered**.
+`register_project` resolves the full path and stores it in
+`mesa.projects.ducklake_path`, and every later push and pull uses that
+stored value. So:
+
+- Changing `data_collection` for an existing deployment does **not**
+  move any data. Existing projects keep reading and writing their
+  original location.
+- Only projects registered after the change use the new name.
+- Moving an existing project's files means moving the iRODS collection
+  *and* updating that project's `ducklake_path` row. This is a manual
+  operator task that the library does not support.
+
+Keep the leading dot unless you have a reason not to (see below).
 
 ## ACLs and ownership
 
@@ -95,8 +127,9 @@ The leading dot in `.mesa/` is deliberate:
 - It signals to other tooling that this subcollection is
   managed and should not be edited by hand.
 
-The convention is part of the contract — do not move the
-subcollection or rename it.
+The convention is part of the contract. Do not move or rename an
+existing project's sub-collection. A new deployment may pick a
+different `data_collection` before it registers any projects.
 
 ## Capacity expectations
 
@@ -165,15 +198,20 @@ backup story for the lakes; it does for the catalog (see
 
 In a disaster scenario:
 
-- The catalog can be restored from `pg_dump`. After restore, run
-  `apply_migrations` to apply any newer schema versions.
+- The catalog can be restored from `pg_dump` (see
+  [`backup.md`](./backup.md)). After restore, run
+  `mesa-ducklake migrate` to apply any newer schema versions, then
+  `mesa-ducklake recover`.
 - The Parquet lakes are restored by the iRODS backup. No
   application-level action is needed.
 - If a single Parquet file is lost but the catalog row remains,
   the corresponding snapshot's data is gone; the catalog row can
   be left as an "orphan" or `DELETE`d. Subsequent reads ignore
-  missing files (DuckDB lists what exists), but the gap shows
-  up in `get_history` as missing events. Recovery from this is
+  missing files: `ensure_cached` logs a warning and DuckDB reads
+  what exists. The gap shows up in `get_history` as missing events.
+  `ensure_cached` also stops at the first failed pull, so snapshots
+  after the missing one may not be pulled into a cold cache for that
+  read either. Recovery from this is
   a one-off operator task.
 
 ## See also

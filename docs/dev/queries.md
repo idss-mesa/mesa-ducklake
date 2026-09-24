@@ -15,7 +15,7 @@ That module exists *only* so that the SQL shape has a single home —
 execution wiring lives in `lake.py` and `time_travel.py`, but the
 shape of the query is part of the project's contract. Any change to
 the template must be mirrored in the time-travel tests in
-`tests/test_time_travel.py`.
+`tests/test_lake.py` and `tests/test_client_e2e.py` / `tests/test_client_e2e_duckdb.py`.
 
 ## `EFFECTIVE_AVUS_AS_OF_SQL`
 
@@ -186,7 +186,7 @@ When you add a new query shape:
 3. **Mirror the partition / order conventions.** Same partition
    key (full triple) for any "what is currently bound" shape;
    same `ts DESC, snapshot_id DESC` tiebreaker.
-4. **Add a regression test** in `tests/test_time_travel.py`
+4. **Add a regression test** in `tests/test_lake.py` and `tests/test_client_e2e.py` / `tests/test_client_e2e_duckdb.py`
    covering empty lake, single snapshot, and supersede chains.
 5. **Don't expose raw SQL through `DuckLakeClient`.** Add a
    method that returns Pydantic models; consumers do not parse

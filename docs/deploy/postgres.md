@@ -2,9 +2,12 @@
 
 What this page covers: installing and configuring a Postgres
 database to host mesa-ducklake's catalog schema on Ubuntu 24.04.
-The catalog only needs the `mesa` schema — it can coexist with the
+The catalog only needs the `mesa` schema. It can coexist with the
 iRODS iCAT schema in the same cluster, or run standalone for
 development.
+
+For a single-user install that does not need Postgres at all, see
+[`duckdb-catalog.md`](./duckdb-catalog.md).
 
 ## Requirements
 
@@ -116,48 +119,43 @@ Use `scram-sha-256`, never `md5` or `trust`, for any TCP path.
 
 ## Apply migrations
 
-The migration runner is part of the Python package. Once the role
-and database exist, install mesa-ducklake (in a venv on the
-catalog host or on any host that can reach it) and run the
-migrations:
+The migration runner ships with the Python package and runs through
+the `mesa-ducklake migrate` CLI verb. Once the role and database
+exist, install mesa-ducklake, either in a venv on the catalog host or
+on any host that can reach it, and run the migrations:
 
 ```bash
 python -m venv /opt/mesa-ducklake/.venv
 source /opt/mesa-ducklake/.venv/bin/activate
-pip install mesa-ducklake     # or pip install -e . from a checkout
+pip install -e /path/to/mesa-ducklake    # from a checkout
 
-python -c "
-from mesa_ducklake.schema import apply_migrations
-n = apply_migrations('postgresql://mesa@/mesa_ducklake')
-print(f'applied {n} migrations')
-"
+export MESA_DUCKLAKE_DSN='postgresql://mesa@/mesa_ducklake'
+mesa-ducklake migrate
 ```
 
-Expected output on a fresh database:
+Expected output on a fresh database, where `0001_initial.sql` and
+`0002_pending_pushes.sql` are applied:
 
-```
-applied 1 migrations
+```json
+{"applied": 2, "target": null, "backend": "postgres"}
 ```
 
 Re-running is idempotent:
 
-```
-applied 0 migrations
-```
-
-For TCP setups, pass the full DSN with credentials:
-
-```bash
-python -c "
-from mesa_ducklake.schema import apply_migrations
-import os
-print(apply_migrations(os.environ['MESA_DUCKLAKE_DSN']))
-"
+```json
+{"applied": 0, "target": null, "backend": "postgres"}
 ```
 
-The runner creates `mesa.schema_versions` automatically (it is the
-bootstrap table that records which migrations have been applied —
-see [`../dev/adding-migrations.md`](../dev/adding-migrations.md)).
+For TCP setups, put the full DSN with credentials in
+`MESA_DUCKLAKE_DSN`. Load it from an `EnvironmentFile=` or a secrets
+manager rather than typing it on the command line. `--target N` stops
+after migration `N`, which is useful for a staged rollout. A failed
+migration rolls back, prints a `migration_failed` JSON envelope on
+stderr, and exits 2 (see [`../user/cli.md`](../user/cli.md#exit-codes)).
+
+The runner creates `mesa.schema_versions` automatically. It is the
+bootstrap table that records which migrations have been applied (see
+[`../dev/adding-migrations.md`](../dev/adding-migrations.md)).
 
 ## Verify the schema
 
@@ -166,19 +164,30 @@ sudo -u mesa psql -d mesa_ducklake <<'SQL'
 \dn mesa
 \dt mesa.*
 SELECT version, filename, applied_at FROM mesa.schema_versions ORDER BY version;
+\d mesa.pending_pushes
+SELECT count(*) AS in_flight FROM mesa.pending_pushes;
 SQL
 ```
 
-You should see the `mesa` schema, the `mesa.projects` and
-`mesa.snapshots` tables, the `mesa.schema_versions` bookkeeping
-table, and at least one row for `0001_initial.sql`.
+You should see:
+
+- the `mesa` schema;
+- the `mesa.projects`, `mesa.snapshots` and `mesa.pending_pushes`
+  tables;
+- the `mesa.schema_versions` bookkeeping table, with rows for
+  `0001_initial.sql` and `0002_pending_pushes.sql`.
+
+On a healthy system, `in_flight` is `0`. Rows that persist there are
+in-flight iRODS pushes that need `mesa-ducklake recover` (see
+[`../user/cli.md`](../user/cli.md)).
 
 ## Routine operations
 
 ### Back up the catalog
 
-The catalog is small but precious — it is the index of every
-project's Parquet lake. A regular `pg_dump` is sufficient:
+The catalog is small but precious, because it is the index of every
+project's Parquet lake. The daily `pg_dump`-to-iRODS pipeline is
+described in [`backup.md`](./backup.md). For a one-off dump:
 
 ```bash
 sudo -u postgres pg_dump -Fc mesa_ducklake > /backup/mesa_ducklake-$(date +%F).dump
@@ -195,8 +204,9 @@ sudo -u postgres createdb --owner=mesa mesa_ducklake
 sudo -u postgres pg_restore -d mesa_ducklake /backup/mesa_ducklake-2026-05-10.dump
 ```
 
-After restore, run `apply_migrations` to apply any newer schema
-versions that were not in the dump.
+After restore, run `mesa-ducklake migrate` to apply any newer schema
+versions that were not in the dump. Then run `mesa-ducklake recover`
+to drain any `mesa.pending_pushes` rows that the dump captured.
 
 ### Inspecting catalog state
 
@@ -226,7 +236,7 @@ LIMIT 20;
 
 ## Pitfalls
 
-- **Do not run `apply_migrations` against the iCAT database.**
+- **Do not run `mesa-ducklake migrate` against the iCAT database.**
   Even though the schemas can coexist in one cluster, give the
   catalog its own database. Migrations only touch the `mesa`
   schema, but an accidental DSN swap is best made impossible
