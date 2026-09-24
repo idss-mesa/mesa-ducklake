@@ -216,3 +216,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Live e2e run artifacts (tests/llm_e2e) and local LLM stack secrets
+.llm-e2e-results/
+deploy/llm-e2e/.env
