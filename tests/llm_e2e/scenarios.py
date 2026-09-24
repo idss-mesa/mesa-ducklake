@@ -65,9 +65,21 @@ class Scenario:
 # ---------------------------------------------------------------------------
 
 
+#: Attribute prefixes the Data Store's own server-side rules write (e.g.
+#: CyVerse's ``ipc_UUID`` on every new object, ``ipc-filetype`` from the
+#: info-typer). mesa-mcp treats them as reserved and never writes them, so
+#: they never pass through DuckLake. Same list as mesa-mcp's
+#: ``ols.transform.RESERVED_PREFIXES``.
+SERVER_MANAGED_PREFIXES = ("ipc-", "ipc_", "irods::")
+
+
+def _user_avus(avus: set[tuple[str, str, str]]) -> set[tuple[str, str, str]]:
+    return {a for a in avus if not a[0].lower().startswith(SERVER_MANAGED_PREFIXES)}
+
+
 def _mirrored(ctx: Any, path: str) -> list[str]:
-    """iRODS and DuckLake must agree on ``path``'s effective AVU set."""
-    irods, lake = ctx.sandbox.irods_avus(path), ctx.lake.avus(path)
+    """iRODS and DuckLake must agree on ``path``'s user-written AVU set."""
+    irods, lake = _user_avus(ctx.sandbox.irods_avus(path)), ctx.lake.avus(path)
     if irods == lake:
         return []
     return [f"{path}: iRODS-only={sorted(irods - lake)} DuckLake-only={sorted(lake - irods)}"]

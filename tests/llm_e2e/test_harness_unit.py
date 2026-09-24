@@ -158,3 +158,16 @@ def test_recorder_tracks_outcomes_and_writes_a_report(tmp_path) -> None:
     assert (tmp_path / "run" / "report.json").exists()
     assert (tmp_path / "run" / "llm" / "a-1.jsonl").exists()
     assert "FAIL" in rec.table()
+
+
+def test_mirror_check_ignores_server_managed_avus() -> None:
+    """CyVerse's own rules stamp ipc_* AVUs that never pass through DuckLake."""
+    from .scenarios import _user_avus
+
+    irods = {
+        ("ipc_UUID", "0737b960", ""),
+        ("ipc-filetype", "csv", "ipc-info-typer"),
+        ("irods::stuff", "x", ""),
+        ("envo.biome", "forest", "ENVO:00000428"),
+    }
+    assert _user_avus(irods) == {("envo.biome", "forest", "ENVO:00000428")}
