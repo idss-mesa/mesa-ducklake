@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 def _utcnow() -> datetime:
@@ -101,6 +101,17 @@ class AvuChange(BaseModel):
             "with 'irods-rule:'. NULL for changes that did not originate in a rule."
         ),
     )
+
+    @field_validator("actor", "source")
+    @classmethod
+    def _provenance_required(cls, v: str) -> str:
+        # Provenance is mandatory (CLAUDE.md, "Conventions"): a change with
+        # no author or no origin cannot be audited, so reject it here rather
+        # than let it reach an append-only Parquet file where it can never
+        # be corrected in place.
+        if not v.strip():
+            raise ValueError("must be a non-empty string (provenance is mandatory)")
+        return v
 
 
 class Project(BaseModel):

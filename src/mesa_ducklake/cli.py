@@ -1,6 +1,6 @@
 """``mesa-ducklake`` command-line entry point.
 
-Two verbs:
+Three verbs:
 
 * ``record`` — the rule-engine callback path. Reads a single JSON
   object from stdin describing one AVU change and records it. See
@@ -9,6 +9,13 @@ Two verbs:
   service start or after an iRODS outage to re-push any in-flight
   Parquet snapshots that didn't commit. Needs an iRODS session,
   constructed from ``~/.irods/`` (or ``IRODS_ENVIRONMENT_FILE``).
+* ``migrate [--target N]`` — apply pending Postgres migrations. On a
+  DuckDB-file catalog there is nothing to migrate (that backend creates
+  its schema on open), so it bootstraps the file and reports
+  ``applied: 0``.
+
+``MESA_DUCKLAKE_DSN`` selects the catalog for every verb: a
+``postgresql://`` URI or libpq keyword DSN, or ``duckdb:///abs/path.duckdb``.
 
 This CLI is the **only** sanctioned non-Python interface to
 mesa-ducklake. Everything else uses :class:`DuckLakeClient`.
@@ -53,6 +60,7 @@ Exit codes
 * ``1`` — generic error (catalog/lake failure, malformed JSON, etc.)
 * ``2`` — path is not within any MESA-enabled project (``record``
   only; the rule may silently skip this one)
+  — or, for ``migrate``, the migration failed
 * ``3`` — ``MESA_DUCKLAKE_DSN`` is unset
 """
 
@@ -159,8 +167,9 @@ def main(
                 "code": "missing_dsn",
                 "message": (
                     "MESA_DUCKLAKE_DSN environment variable is unset. "
-                    "Set it to a libpq DSN for the mesa-ducklake Postgres "
-                    "catalog."
+                    "Set it to the mesa-ducklake catalog DSN: "
+                    "postgresql://… (or a libpq keyword DSN) or "
+                    "duckdb:///abs/path.duckdb."
                 ),
             },
         )
@@ -203,6 +212,7 @@ def _migrate(
     version, which is what makes a staged rollout or a bisect possible.
     Idempotent: re-running applies nothing and reports ``applied: 0``.
     """
+    from mesa_ducklake.catalog import catalog_backend, open_catalog
     from mesa_ducklake.schema import apply_migrations
 
     target: int | None = None
@@ -229,7 +239,15 @@ def _migrate(
             return 1
 
     try:
-        applied = apply_migrations(dsn, target=target)
+        backend = catalog_backend(dsn)
+        if backend == "duckdb":
+            # The DuckDB catalog has no migration history: opening it runs
+            # its idempotent schema bootstrap. Doing that here still gives
+            # operators one command that prepares either backend.
+            open_catalog(dsn).close()
+            applied = 0
+        else:
+            applied = apply_migrations(dsn, target=target)
     except Exception as exc:
         _stderr_json(
             stderr,
@@ -237,7 +255,7 @@ def _migrate(
         )
         return 2
 
-    json.dump({"applied": applied, "target": target}, stdout)
+    json.dump({"applied": applied, "target": target, "backend": backend}, stdout)
     stdout.write("\n")
     return 0
 
@@ -261,7 +279,7 @@ def _recover(dsn: str, stdout: IO[str], stderr: IO[str]) -> int:
     try:
         with iRODSSession(irods_env_file=env_file) as session:
             with DuckLakeClient(
-                postgres_dsn=dsn, irods_session=session
+                catalog_dsn=dsn, irods_session=session
             ) as client:
                 summary = client.recover_pending_pushes()
     except FileNotFoundError as exc:
@@ -324,7 +342,7 @@ def _record(
         return 1
 
     try:
-        client = DuckLakeClient(postgres_dsn=dsn, irods_session=None)
+        client = DuckLakeClient(catalog_dsn=dsn, irods_session=None)
     except Exception as exc:  # noqa: BLE001 - surface anything from psycopg
         _stderr_json(
             stderr,

@@ -441,17 +441,16 @@ def _duckdb_uri_to_path(uri: str) -> str:
     return rest  # 'duckdb:///abs/p.duckdb' -> '/abs/p.duckdb'
 
 
-def open_catalog(dsn: str) -> CatalogStore:
-    """Construct the catalog backend implied by ``dsn``.
+def catalog_backend(dsn: str) -> str:
+    """Name the catalog backend implied by ``dsn``: ``"postgres"`` or ``"duckdb"``.
 
-    * ``postgresql://`` / ``postgres://`` (or a libpq keyword DSN) ->
-      :class:`PostgresCatalogStore`
-    * ``duckdb://…`` URI, a path ending ``.duckdb``, or ``:memory:`` ->
-      :class:`DuckDBCatalogStore`
+    * ``postgresql://`` / ``postgres://`` (or a libpq keyword DSN) -> ``"postgres"``
+    * ``duckdb://…`` URI, a path ending ``.duckdb``, or ``:memory:`` -> ``"duckdb"``
     * blank / unrecognized -> ``ValueError``
 
-    Callers that treat a blank DSN as "DuckLake disabled" must gate on that
-    before calling — this factory raises on blank.
+    Split out of :func:`open_catalog` so callers that must behave
+    differently per backend (the ``migrate`` CLI verb) can decide without
+    opening a connection.
     """
     if dsn is None or not str(dsn).strip():
         raise ValueError("open_catalog requires a non-empty catalog DSN")
@@ -459,12 +458,27 @@ def open_catalog(dsn: str) -> CatalogStore:
     if s.startswith(("postgresql://", "postgres://")) or (
         "://" not in s and ("dbname=" in s or "host=" in s)
     ):
-        return PostgresCatalogStore(s)
-    if s.startswith("duckdb://"):
-        return DuckDBCatalogStore(_duckdb_uri_to_path(s))
-    if s == ":memory:" or s.endswith(".duckdb"):
-        return DuckDBCatalogStore(s)
+        return "postgres"
+    if s.startswith("duckdb://") or s == ":memory:" or s.endswith(".duckdb"):
+        return "duckdb"
     raise ValueError(
         f"unrecognized catalog DSN"
         f" (expected postgresql://, duckdb://…, *.duckdb, or :memory:): {dsn!r}"
     )
+
+
+def open_catalog(dsn: str) -> CatalogStore:
+    """Construct the catalog backend implied by ``dsn``.
+
+    See :func:`catalog_backend` for how the DSN selects
+    :class:`PostgresCatalogStore` or :class:`DuckDBCatalogStore`.
+
+    Callers that treat a blank DSN as "DuckLake disabled" must gate on that
+    before calling — this factory raises on blank.
+    """
+    s = str(dsn).strip() if dsn is not None else ""
+    if catalog_backend(s) == "postgres":
+        return PostgresCatalogStore(s)
+    if s.startswith("duckdb://"):
+        return DuckDBCatalogStore(_duckdb_uri_to_path(s))
+    return DuckDBCatalogStore(s)
