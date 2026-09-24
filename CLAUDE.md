@@ -1,4 +1,39 @@
-# mesa-ducklake — Project Guide for Claude Code
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Commands
+
+```bash
+pip install -e ".[dev]"                 # Python >=3.11; hatchling build
+pytest -q                               # full suite
+pytest tests/test_lake.py::test_name -q # single test
+ruff check src/ tests/                  # lint (CI gate; line length 100, rules E F I W B UP)
+mypy src/                               # advisory only in CI (continue-on-error)
+```
+
+**Postgres tests skip silently.** ~40 tests are marked
+`requires_postgres` and auto-skip when no server is reachable, so a green
+`pytest -q` may have tested none of the Postgres catalog — check the skip
+count. Either have `pg_ctl` on PATH (pytest-postgresql starts an ephemeral
+cluster) or point at an existing server:
+
+```bash
+docker run --rm -d -p 5432:5432 -e POSTGRES_PASSWORD=postgres postgres:16
+MESA_DUCKLAKE_TEST_PG_HOST=localhost pytest -q -m requires_postgres
+```
+
+Overrides: `MESA_DUCKLAKE_TEST_PG_{PORT,USER,PASSWORD,DBNAME}` (see
+`tests/_pg_env.py`). Each test gets its own database created by
+pytest-postgresql's `DatabaseJanitor`, so don't pre-create `mesa_test` on
+the server (it fails with `DuplicateDatabase`).
+
+CLI (`mesa-ducklake`, entry point `mesa_ducklake.cli:_console_main`) needs
+`MESA_DUCKLAKE_DSN` set. Verbs: `record` (the default when no verb is given;
+JSON on stdin, used by iRODS rules), `recover` (drain the pending-push WAL;
+reads `~/.irods/irods_environment.json`), and `migrate [--target N]`
+(idempotent; prints `{"applied": N, ...}`). Errors are JSON on stderr with
+a non-zero exit code.
 
 ## What this project is
 
@@ -9,7 +44,7 @@ pattern: a **Postgres** catalog (matching iRODS iCAT's engine) plus
 **Parquet** data files stored at `/.mesa/ducklake/` *inside the iRODS
 project itself*, so the metadata history travels with the data.
 
-Its primary consumer is the sibling project **`cyverse/mesa-mcp`** — an
+Its primary consumer is the sibling project **`idss-mesa/mesa-mcp`** — an
 MCP server that exposes CyVerse Data Store operations plus OBO/OLS-driven
 metadata creation. Every AVU change made through mesa-mcp is mirrored
 into mesa-ducklake.
@@ -66,7 +101,17 @@ in-process query engine that reads both transparently.
 ## Resolved decisions (from the mesa-mcp design conversation)
 
 - **Catalog engine:** Postgres (same as iCAT — one cluster can host
-  both schemas).
+  both schemas) for hosted/multi-writer deployments. A single-writer
+  **DuckDB-file catalog** (`catalog_duckdb.py`) also exists for
+  local-install use. `catalog.open_catalog(dsn)` picks the backend from
+  the DSN: `postgresql://…` or libpq keywords → `PostgresCatalogStore`;
+  `duckdb://…`, `*.duckdb`, or `:memory:` → `DuckDBCatalogStore`. Both
+  implement the `CatalogStore` Protocol in `catalog_base.py`, so any new
+  catalog operation must be added to **both** backends. The DuckDB
+  backend creates its schema inline, with idempotent `CREATE … IF NOT
+  EXISTS` and no FKs. `migrations/` and `apply_migrations` are
+  Postgres-only, so a Postgres schema change usually needs a matching
+  edit to `_SCHEMA_STATEMENTS` in `catalog_duckdb.py`.
 - **Data file format:** Parquet, written via DuckLake.
 - **Data file location:** `/.mesa/ducklake/` inside each MESA-enabled
   iRODS collection (the "metadata travels with the data" rule).
@@ -148,30 +193,28 @@ queries either set the DuckDB snapshot context or filter on `ts <=`.
 
 ## Package layout
 
-```
-mesa-ducklake/
-├── src/mesa_ducklake/
-│   ├── __init__.py            # re-exports DuckLakeClient
-│   ├── client.py              # DuckLakeClient — the only public facade
-│   ├── catalog.py             # Postgres catalog ops (project + snapshot tables)
-│   ├── lake.py                # DuckDB / DuckLake connection + Parquet writes
-│   ├── schema.py              # SQL DDL + migration runner
-│   ├── models.py              # Pydantic models: Project, Snapshot, AvuChange
-│   ├── queries.py             # Effective-AVU and history reconstruction queries
-│   ├── time_travel.py         # As-of-T and diff helpers
-│   └── irods_path.py          # Helpers: project root detection, .mesa path math
-├── migrations/
-│   └── 0001_initial.sql       # mesa schema DDL
-├── tests/
-│   ├── conftest.py            # pytest fixtures: ephemeral Postgres, tmp ducklake
-│   ├── test_catalog.py
-│   ├── test_lake.py
-│   ├── test_time_travel.py
-│   └── test_e2e.py
-├── pyproject.toml
-├── config.yaml.example
-└── README.md
-```
+Only `DuckLakeClient` (plus the `AvuChange`/`Project`/`Snapshot` models)
+is public; everything else under `src/mesa_ducklake/` is internal. The
+pieces that aren't obvious from the file names:
+
+- `catalog.py`: `PostgresCatalogStore` and the `open_catalog` factory.
+  `catalog_duckdb.py` is the DuckDB twin, and `catalog_base.py` holds the
+  shared `CatalogStore` Protocol.
+- `lake.py`: `LakeStore`, the `LakeStorage` Protocol, and
+  `LocalLakeStorage`. It opens an in-memory DuckDB connection per call and
+  exposes a `read_parquet` glob as the `avu_changes` view. Parquet output
+  is `ORDER BY`-deterministic, which is what makes iRODS re-pushes
+  idempotent.
+- `irods_sync.py`: push/pull between the local cache and
+  `<project>/.mesa/ducklake/`, with checksum verification.
+- `cache.py`: LRU-by-mtime eviction of the local Parquet cache.
+- `queries.py`: the single source of truth for the effective-AVU SQL.
+- `migrations/NNNN_*.sql` (Postgres only), `irods-rules/`, and `deploy/`
+  (the systemd timer plus `backup-pg.sh` for the daily `pg_dump` to
+  iRODS).
+- `docs/`: user, dev, and deploy docs. `docs/dev/architecture.md` has the
+  full write/recovery protocol, and `docs/dev/contributing.md` has the
+  schema-change checklist and test expectations.
 
 ## Public API sketch (DuckLakeClient)
 
@@ -179,13 +222,14 @@ mesa-ducklake/
 from mesa_ducklake import DuckLakeClient, AvuChange
 
 client = DuckLakeClient(
-    postgres_dsn="postgresql://...",
-    irods_session=irods_session,   # python-irodsclient session
+    catalog_dsn="postgresql://...",  # or duckdb:///path.duckdb; postgres_dsn= is a legacy alias
+    irods_session=irods_session,     # python-irodsclient session; None = local-only mode
+    # cache_dir=, cache_cap_bytes=, data_collection= (default ".mesa/ducklake")
 )
 
 # project lifecycle
 project = client.register_project(irods_path="/iplant/home/alice/myproj",
-                                  actor="alice")
+                                  actor="alice", zone="iplant")
 
 # write
 snap = client.record_changes(
@@ -304,18 +348,19 @@ production each CyVerse deployment runs its own.
 
 ## Reference repositories
 
-All cloned as siblings under `/home/exouser/`. Read these before making
-non-obvious changes:
+Cloned as siblings of this repo (`../mesa-mcp`, `../irods-mcp-server`;
+`esiil-portal` is not cloned locally). This repo's remote is
+`idss-mesa/mesa-ducklake`. Read these before making non-obvious changes:
 
 | Repo | Why it matters |
 |---|---|
-| `cyverse/mesa-mcp` | Primary consumer; its `CLAUDE.md` has the full architecture context. |
-| `cyverse/irods-mcp-server` | AVU tool shapes (Go) — used to keep our AVU model compatible. |
+| `idss-mesa/mesa-mcp` | Primary consumer; its `CLAUDE.md` has the full architecture context. |
+| `idss-mesa/irods-mcp-server` | AVU tool shapes (Go) — used to keep our AVU model compatible. |
 | `cyverse/esiil-portal` | Already writes AVUs with OBO/OLS CURIE units; we must round-trip those without loss. See `portal/services/ols_transform.py`. |
 
 ## Working with this repo
 
-- The package is built out: `CatalogStore`, `LakeStore` (with
+- The package is built out: `CatalogStore` (Postgres + DuckDB backends), `LakeStore` (with
   `LocalLakeStorage`), the full `DuckLakeClient` API, the
   `mesa-ducklake record`/`recover` CLI, the iRODS sync sidecar, and
   the daily `pg_dump`-to-iRODS backup pipeline all exist. Tests cover
@@ -346,5 +391,27 @@ non-obvious changes:
   on production iRODS (so `imeta` writes reach the history), snapshot
   compaction (per-project parquet consolidation), and Postgres
   WAL-shipping to iRODS for sub-minute catalog RPO.
-- For non-trivial design work (new query patterns, schema changes,
-  snapshot semantics), invoke the `ducklake-engineer` sub-agent.
+- Live LLM e2e tests live under `tests/llm_e2e/` behind the opt-in
+  markers `live_e2e` (scripted tool calls against real iRODS) and
+  `llm_e2e` (a real LLM drives mesa-mcp). They never run in plain
+  `pytest -q`. See `docs/dev/llm-e2e-tests.md`.
+- **Agents and skills** (project-scoped, in `.claude/`). Ask for an
+  agent by name ("use the contract-reviewer agent") or @-mention it:
+  - `ducklake-engineer`: non-trivial design and implementation, such
+    as schema changes, new query patterns, snapshot semantics, the
+    write/sync path, or the public API.
+  - `contract-reviewer`: read-only review of a diff against the hard
+    contracts, including backend parity and frozen migrations. Run it
+    before a PR.
+  - `docs-auditor`: read-only search for docs that the code
+    contradicts.
+  - `llm-e2e-triage`: classifies failures in `.llm-e2e-results/<run>/`.
+  - Skill `add-migration`: any catalog or Parquet schema change
+    (Postgres migration plus the DuckDB `_SCHEMA_STATEMENTS` twin).
+  - Skill `add-catalog-op`: a new or changed `CatalogStore` method on
+    both backends.
+  - Skill `run-llm-e2e`: running the `live_e2e` / `llm_e2e` tiers.
+  - Skill `docs-sync`: after any code change, a module-to-doc map of
+    what to update.
+  - `AGENTS.md` is the short, vendor-neutral version of this file for
+    other coding agents. Keep its commands and contracts in sync.
