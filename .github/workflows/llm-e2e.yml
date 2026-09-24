@@ -23,8 +23,10 @@ on:
         description: "LLM_REPEATS (pass@k)"
         default: "1"
       mesa_mcp_ref:
+        # The ticket_provenance and apply_term_ror scenarios need fixes that
+        # are on this branch; switch the default back to main once it merges.
         description: "idss-mesa/mesa-mcp ref to test against"
-        default: main
+        default: fix/ducklake-provenance-and-ols-config
 
 concurrency:
   group: llm-e2e

@@ -20,12 +20,12 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 from uuid import UUID
 
 import duckdb
 
-from mesa_ducklake.models import AvuChange
+from mesa_ducklake.models import STORED_ROW, AvuChange
 from mesa_ducklake.queries import EFFECTIVE_AVUS_AS_OF_SQL
 
 
@@ -114,6 +114,16 @@ _PARQUET_COLUMNS = (
     "via_ticket",
     "rule_invocation",
 )
+
+
+def _stored_change(**fields: Any) -> AvuChange:
+    """Build an ``AvuChange`` from a row already in Parquet.
+
+    Full validation still applies (types, enums, UUID/timestamp coercion);
+    only the input-side provenance check is waived, because stored history
+    is immutable and must stay readable.
+    """
+    return AvuChange.model_validate(fields, context={STORED_ROW: True})
 
 
 class LakeStore:
@@ -245,7 +255,7 @@ class LakeStore:
             via_ticket,
             rule_invocation,
         ) = row
-        return AvuChange(
+        return _stored_change(
             project_id=UUID(str(project_id)) if project_id is not None else None,
             snapshot_id=snapshot_id,
             irods_path=irods_path,
@@ -297,7 +307,7 @@ class LakeStore:
                 rule_invocation,
             ) = r
             results.append(
-                AvuChange(
+                _stored_change(
                     project_id=project_id,
                     snapshot_id=snapshot_id,
                     irods_path=irods_path,

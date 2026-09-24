@@ -362,7 +362,7 @@ Cloned as siblings of this repo (`../mesa-mcp`, `../irods-mcp-server`;
 
 - The package is built out: `CatalogStore` (Postgres + DuckDB backends), `LakeStore` (with
   `LocalLakeStorage`), the full `DuckLakeClient` API, the
-  `mesa-ducklake record`/`recover` CLI, the iRODS sync sidecar, and
+  `mesa-ducklake record`/`recover`/`migrate` CLI, the iRODS sync sidecar, and
   the daily `pg_dump`-to-iRODS backup pipeline all exist. Tests cover
   catalog (unit + ephemeral Postgres), lake (DuckDB I/O), iRODS sync
   (PRC-mocked), cache eviction, and the CLI.

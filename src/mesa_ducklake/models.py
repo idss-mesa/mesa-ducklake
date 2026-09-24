@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 
 def _utcnow() -> datetime:
@@ -35,6 +35,11 @@ of what an AVU can be attached to."""
 
 ProjectStatus = Literal["active", "archived"]
 """Allowed values for ``Project.status``."""
+
+
+#: Validation-context key marking an ``AvuChange`` re-hydrated from stored
+#: Parquet rather than supplied by a caller (see ``_provenance_required``).
+STORED_ROW = "mesa_ducklake.stored_row"
 
 
 class AvuChange(BaseModel):
@@ -104,11 +109,17 @@ class AvuChange(BaseModel):
 
     @field_validator("actor", "source")
     @classmethod
-    def _provenance_required(cls, v: str) -> str:
+    def _provenance_required(cls, v: str, info: ValidationInfo) -> str:
         # Provenance is mandatory (CLAUDE.md, "Conventions"): a change with
         # no author or no origin cannot be audited, so reject it here rather
         # than let it reach an append-only Parquet file where it can never
         # be corrected in place.
+        #
+        # Rows re-hydrated from Parquet are exempt: history written before
+        # this check existed cannot be rewritten, and refusing to *read* it
+        # would make that path's history permanently unreadable.
+        if (info.context or {}).get(STORED_ROW):
+            return v
         if not v.strip():
             raise ValueError("must be a non-empty string (provenance is mandatory)")
         return v
