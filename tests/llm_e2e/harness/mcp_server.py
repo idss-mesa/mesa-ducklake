@@ -110,6 +110,6 @@ async def open_mesa_mcp(
         async with Client(
             stdio_client(params, errlog=errlog),
             elicitation_callback=broker,
-            read_timeout_seconds=120,
+            read_timeout_seconds=cfg.tool_timeout,
         ) as client:
             yield MesaMcp(client, broker)

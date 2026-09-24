@@ -12,7 +12,7 @@ from .harness.checks import LakeView, open_lake
 from .harness.config import E2EConfig
 from .harness.llm_agent import run_agent
 from .harness.mcp_server import ToolOutcome, open_mesa_mcp
-from .harness.oracle import Term
+from .harness.oracle import OracleUnavailable, Term
 from .harness.report import Recorder, ScenarioResult
 from .harness.sandbox import Sandbox
 from .scenarios import Scenario, prefetch_terms
@@ -145,7 +145,37 @@ async def _llm(sess: Session, scn: Scenario, ctx: Ctx, log) -> tuple[list[str], 
 
 
 def run_scenario(sess: Session, scn: Scenario, tier: str, attempt: int = 0) -> ScenarioResult:
+    """Run one scenario; any crash is recorded as a failure, never dropped.
+
+    Without this, an exception in setup or in the MCP call (a Data Store
+    stall, a tool timeout) left no transcript and no report entry, so the
+    run's report silently had fewer scenarios than were collected.
+    """
     log = sess.recorder.transcript(tier, scn.id, attempt)
+    try:
+        return _run_scenario(sess, scn, tier, attempt, log)
+    except OracleUnavailable:
+        raise
+    except BaseException as exc:
+        detail = f"{type(exc).__name__}: {exc}"
+        if isinstance(exc, BaseExceptionGroup):
+            detail += " <- " + "; ".join(f"{type(e).__name__}: {e}" for e in exc.exceptions)
+        log({"event": "crash", "error": detail})
+        result = ScenarioResult(
+            tier=tier,
+            scenario=scn.id,
+            attempt=attempt,
+            passed=False,
+            failures=[f"scenario crashed: {detail}"],
+            model=sess.cfg.llm_model if tier == "llm" else "",
+        )
+        sess.recorder.add(result)
+        if not isinstance(exc, Exception):
+            raise  # KeyboardInterrupt and friends still stop the run
+        return result
+
+
+def _run_scenario(sess: Session, scn: Scenario, tier: str, attempt: int, log) -> ScenarioResult:
     ctx = _make_ctx(sess, scn, tier, attempt)
     before = _snapshot_count(sess)
     started = time.monotonic()

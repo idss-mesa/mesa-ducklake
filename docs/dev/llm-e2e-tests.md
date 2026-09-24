@@ -114,6 +114,7 @@ install mesa-mcp *after* it, into the same environment.
 | `LLM_API_KEY` | depends | The LiteLLM master key or the AI Verde key. |
 | `LLM_TEMPERATURE`, `LLM_MAX_TURNS`, `LLM_TIMEOUT` | no | Defaults `0`, `12`, `300`. |
 | `LLM_REPEATS` | no | Runs each LLM scenario N times; all N must pass (pass@k). |
+| `MESA_E2E_TOOL_TIMEOUT` | no | Seconds allowed for one MCP tool call (default `300`). A call can include a Parquet upload to the Data Store, which occasionally stalls. |
 | `MESA_E2E_MESA_MCP_CMD` | no | The mesa-mcp executable (default `mesa-mcp` on `PATH`). |
 | `MESA_E2E_KEEP`, `MESA_E2E_RESULTS_DIR`, `MESA_E2E_RUN_ID` | no | Keep the sandbox; artifact root (default `.llm-e2e-results/`); run label. |
 

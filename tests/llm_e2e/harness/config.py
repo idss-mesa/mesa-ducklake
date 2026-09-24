@@ -38,6 +38,7 @@ class E2EConfig:
     llm_max_turns: int
     llm_repeats: int
     llm_timeout: float
+    tool_timeout: float
     # Extra env forwarded to the mesa-mcp subprocess (credentials, config).
     passthrough_env: dict[str, str] = field(default_factory=dict)
 
@@ -64,6 +65,9 @@ class E2EConfig:
             llm_max_turns=int(_get(src, "LLM_MAX_TURNS", "12")),
             llm_repeats=max(1, int(_get(src, "LLM_REPEATS", "1"))),
             llm_timeout=float(_get(src, "LLM_TIMEOUT", "300")),
+            # One tool call can include a Parquet upload to the Data Store,
+            # which occasionally stalls for minutes.
+            tool_timeout=float(_get(src, "MESA_E2E_TOOL_TIMEOUT", "300")),
             passthrough_env=passthrough,
         )
 

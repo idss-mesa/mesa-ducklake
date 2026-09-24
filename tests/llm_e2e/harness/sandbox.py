@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import secrets
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -130,7 +131,7 @@ class Sandbox:
             target = self.session.collections.get(path)
         return {(m.name, m.value, m.units or "") for m in target.metadata.items()}
 
-    def teardown(self, keep: bool = False) -> None:
+    def teardown(self, keep: bool = False, retries: int = 5, retry_delay: float = 15.0) -> None:
         from irods.ticket import Ticket
 
         for t in self.tickets:
@@ -138,5 +139,15 @@ class Sandbox:
                 Ticket(self.session, t).delete()
             except Exception:  # pragma: no cover - best effort cleanup
                 pass
-        if not keep:
-            self.session.collections.remove(self.root, recurse=True, force=True)
+        if keep:
+            return
+        # A Parquet upload that stalled mid-run can leave a replica locked for
+        # a while, so the first remove may fail with CAT_COLLECTION_NOT_EMPTY.
+        for attempt in range(retries):
+            try:
+                self.session.collections.remove(self.root, recurse=True, force=True)
+                return
+            except Exception:
+                if attempt == retries - 1:
+                    raise
+                time.sleep(retry_delay)
