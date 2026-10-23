@@ -43,6 +43,10 @@ In practice:
   events would collide on the lock.
 - Do not put the file on a network filesystem shared between hosts.
 
+To give several processes or hosts one DuckDB catalog, serve the file
+with `mesa-ducklake serve-catalog` instead; see
+[`quack-catalog.md`](./quack-catalog.md).
+
 ## DSN forms
 
 The backend is selected from the same `catalog_dsn` (Python) or
@@ -55,6 +59,12 @@ The backend is selected from the same `catalog_dsn` (Python) or
 | `duckdb://catalog.duckdb` | `catalog.duckdb` relative to the process's working directory |
 | `/home/alice/mesa/catalog.duckdb` or `catalog.duckdb` | A bare path works if it ends in `.duckdb` |
 | `duckdb://:memory:` or `:memory:` | In-memory database, discarded on close. For tests only. |
+| any of the above plus `?storage_version=v1.5.0` | Creates the file in a format DuckDB 1.5 can open (see below) |
+
+DuckDB 2.0 creates files that DuckDB 1.x cannot open. Add
+`?storage_version=v1.5.0` when an older host must read the file. It
+applies only when the file is created; an existing file keeps its
+format.
 
 A leading `~` is expanded. Parent directories are created on open.
 A DSN that matches neither the Postgres forms nor the DuckDB forms
@@ -156,6 +166,7 @@ importable: `pip install -e "../mesa-mcp[ducklake]"`.
 ## See also
 
 - [`postgres.md`](./postgres.md): the multi-writer backend.
+- [`quack-catalog.md`](./quack-catalog.md): serving this file to several writers.
 - [`../user/usage.md`](../user/usage.md#choosing-a-catalog-backend):
   choosing a backend from Python.
 - [`../user/cli.md`](../user/cli.md): `MESA_DUCKLAKE_DSN` for the CLI.

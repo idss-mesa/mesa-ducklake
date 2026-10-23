@@ -15,7 +15,7 @@ from mesa_ducklake.irods_path import (
 
 def test_package_exports() -> None:
     """The top-level package re-exports the documented public symbols."""
-    assert mesa_ducklake.__version__ == "0.1.0"
+    assert mesa_ducklake.__version__ == "0.2.0"
     assert mesa_ducklake.DuckLakeClient is DuckLakeClient
     assert mesa_ducklake.AvuChange is AvuChange
     assert mesa_ducklake.Project is Project

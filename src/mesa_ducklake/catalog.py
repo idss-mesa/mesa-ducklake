@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any
+from urllib.parse import parse_qs
 from uuid import UUID
 
 import psycopg
@@ -21,6 +22,7 @@ from psycopg.rows import dict_row
 
 from mesa_ducklake.catalog_base import CatalogStore
 from mesa_ducklake.catalog_duckdb import DuckDBCatalogStore
+from mesa_ducklake.catalog_quack import QuackCatalogStore
 from mesa_ducklake.irods_path import ducklake_subpath
 from mesa_ducklake.models import PARQUET_FILE_PENDING, PendingPush, Project, Snapshot
 
@@ -433,6 +435,24 @@ class PostgresCatalogStore:
             self._conn.close()
 
 
+_DUCKDB_DSN_OPTIONS = {"storage_version"}
+
+
+def _split_dsn_options(dsn: str) -> tuple[str, dict[str, str]]:
+    """Split ``?key=value`` options off a ``duckdb://``/``quack://``/``*.duckdb`` DSN."""
+    base, sep, query = dsn.partition("?")
+    if not sep:
+        return dsn, {}
+    options = {k: v[-1] for k, v in parse_qs(query, keep_blank_values=True).items()}
+    unknown = set(options) - _DUCKDB_DSN_OPTIONS
+    if unknown:
+        raise ValueError(
+            f"unknown catalog DSN option(s) {sorted(unknown)};"
+            f" supported: {sorted(_DUCKDB_DSN_OPTIONS)}"
+        )
+    return base, options
+
+
 def _duckdb_uri_to_path(uri: str) -> str:
     """Map a ``duckdb://`` URI to a filesystem path (or ``:memory:``)."""
     rest = uri[len("duckdb://"):]
@@ -442,10 +462,13 @@ def _duckdb_uri_to_path(uri: str) -> str:
 
 
 def catalog_backend(dsn: str) -> str:
-    """Name the catalog backend implied by ``dsn``: ``"postgres"`` or ``"duckdb"``.
+    """Name the catalog backend implied by ``dsn``: ``"postgres"``, ``"duckdb"`` or ``"quack"``.
 
     * ``postgresql://`` / ``postgres://`` (or a libpq keyword DSN) -> ``"postgres"``
-    * ``duckdb://…`` URI, a path ending ``.duckdb``, or ``:memory:`` -> ``"duckdb"``
+    * ``duckdb://…`` URI, a path ending ``.duckdb``, or ``:memory:`` -> ``"duckdb"``;
+      may carry ``?storage_version=v1.5.0`` to keep a new file readable by DuckDB 1.x
+    * ``quack://host:port`` -> ``"quack"`` (a catalog served by
+      ``mesa-ducklake serve-catalog``; token in ``MESA_DUCKLAKE_QUACK_TOKEN``)
     * blank / unrecognized -> ``ValueError``
 
     Split out of :func:`open_catalog` so callers that must behave
@@ -459,11 +482,14 @@ def catalog_backend(dsn: str) -> str:
         "://" not in s and ("dbname=" in s or "host=" in s)
     ):
         return "postgres"
-    if s.startswith("duckdb://") or s == ":memory:" or s.endswith(".duckdb"):
+    base, _ = _split_dsn_options(s)
+    if base.startswith("quack://"):
+        return "quack"
+    if base.startswith("duckdb://") or base == ":memory:" or base.endswith(".duckdb"):
         return "duckdb"
     raise ValueError(
         f"unrecognized catalog DSN"
-        f" (expected postgresql://, duckdb://…, *.duckdb, or :memory:): {dsn!r}"
+        f" (expected postgresql://, duckdb://…, *.duckdb, :memory:, or quack://): {dsn!r}"
     )
 
 
@@ -471,14 +497,20 @@ def open_catalog(dsn: str) -> CatalogStore:
     """Construct the catalog backend implied by ``dsn``.
 
     See :func:`catalog_backend` for how the DSN selects
-    :class:`PostgresCatalogStore` or :class:`DuckDBCatalogStore`.
+    :class:`PostgresCatalogStore`, :class:`DuckDBCatalogStore` or
+    :class:`~mesa_ducklake.catalog_quack.QuackCatalogStore`.
 
     Callers that treat a blank DSN as "DuckLake disabled" must gate on that
     before calling — this factory raises on blank.
     """
     s = str(dsn).strip() if dsn is not None else ""
-    if catalog_backend(s) == "postgres":
+    backend = catalog_backend(s)
+    if backend == "postgres":
         return PostgresCatalogStore(s)
-    if s.startswith("duckdb://"):
-        return DuckDBCatalogStore(_duckdb_uri_to_path(s))
-    return DuckDBCatalogStore(s)
+    base, options = _split_dsn_options(s)
+    if backend == "quack":
+        if options:
+            raise ValueError(f"quack:// catalog DSNs take no options: {dsn!r}")
+        return QuackCatalogStore(base[len("quack://"):].rstrip("/"))
+    path = _duckdb_uri_to_path(base) if base.startswith("duckdb://") else base
+    return DuckDBCatalogStore(path, storage_version=options.get("storage_version") or None)

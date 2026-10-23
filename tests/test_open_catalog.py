@@ -46,3 +46,24 @@ def test_blank_raises():
 def test_unrecognized_raises():
     with pytest.raises(ValueError):
         open_catalog("mysql://nope/db")
+
+
+def test_duckdb_storage_version_option(tmp_path):
+    store = open_catalog(f"duckdb://{tmp_path / 'c.duckdb'}?storage_version=v1.5.0")
+    assert isinstance(store, DuckDBCatalogStore)
+    store.close()
+
+
+def test_bare_path_storage_version_option(tmp_path):
+    store = open_catalog(f"{tmp_path / 'c.duckdb'}?storage_version=v1.5.0")
+    assert isinstance(store, DuckDBCatalogStore)
+    store.close()
+
+
+def test_unknown_duckdb_option_raises(tmp_path):
+    with pytest.raises(ValueError, match="unknown catalog DSN option"):
+        open_catalog(f"duckdb://{tmp_path / 'c.duckdb'}?read_only=true")
+
+
+def test_postgres_query_string_is_left_alone():
+    assert cat.catalog_backend("postgresql://u@h/db?sslmode=require") == "postgres"

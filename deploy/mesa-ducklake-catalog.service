@@ -1,0 +1,51 @@
+[Unit]
+Description=mesa-ducklake — Quack catalog server (multi-writer DuckDB catalog)
+Documentation=file:///home/exouser/mesa-ducklake/docs/deploy/quack-catalog.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# The only process that opens the catalog file. Clients reach it through
+# quack://<host>:<port>, normally via a TLS reverse proxy (see the doc).
+User=exouser
+Group=exouser
+
+# systemd creates /var/lib/mesa-ducklake (owned by User=) and keeps it
+# writable under ProtectSystem=strict. HOME points there too, so DuckDB's
+# extension cache (~/.duckdb, where quack is installed on first run) lands
+# in a directory that exists and is writable on a fresh host.
+StateDirectory=mesa-ducklake
+StateDirectoryMode=0750
+Environment=HOME=/var/lib/mesa-ducklake
+Environment=MESA_DUCKLAKE_DSN=duckdb:///var/lib/mesa-ducklake/catalog.duckdb
+# The token every client presents. Kept out of the unit so it is not
+# world-readable via ``systemctl show``.
+ExecStart=/bin/sh -c 'MESA_DUCKLAKE_QUACK_TOKEN="$(cat /etc/mesa-ducklake/quack_token)" exec /home/exouser/mesa-ducklake/.venv/bin/mesa-ducklake serve-catalog --host localhost --port 9494'
+
+# SIGTERM stops the server and closes the file cleanly (checkpoint).
+KillSignal=SIGTERM
+TimeoutStopSec=60
+Restart=on-failure
+RestartSec=5
+
+SyslogIdentifier=mesa-ducklake-catalog
+
+# Security hardening — reads the token and writes only the state
+# directory above (catalog file + DuckDB extension cache).
+NoNewPrivileges=yes
+ProtectSystem=strict
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+ProtectClock=yes
+ProtectHostname=yes
+
+[Install]
+WantedBy=multi-user.target

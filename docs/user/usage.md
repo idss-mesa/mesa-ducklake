@@ -16,7 +16,7 @@ pip install -e ".[dev]"
 ```
 
 Runtime dependencies (pulled automatically by `pip`):
-`duckdb>=1.1`, `platformdirs>=4.0`, `psycopg[binary]>=3.2`,
+`duckdb>=2.0,<3`, `platformdirs>=4.0`, `psycopg[binary]>=3.2`,
 `pydantic>=2.6`, `python-irodsclient>=2.0`, `pytz`. Python 3.11 or newer is required.
 
 ## Importing the public surface
@@ -76,6 +76,8 @@ connection. You can also call `client.close()` directly.
 | `duckdb:///abs/path/catalog.duckdb` | DuckDB file | Single-user and local installs. No server needed. The schema is created on first open. **Single writer.** |
 | `something.duckdb`, `duckdb://relative.duckdb` | DuckDB file | As above, resolved relative to the current directory. Prefer an absolute path. |
 | `:memory:` | In-memory DuckDB | Tests and throwaway scripts. |
+| any DuckDB form plus `?storage_version=v1.5.0` | DuckDB file | As above, but a newly created file stays readable by DuckDB 1.x. |
+| `quack://host:port` | DuckDB file served by `mesa-ducklake serve-catalog` | Several writer processes without Postgres (beta). Token in `MESA_DUCKLAKE_QUACK_TOKEN`. See [`../deploy/quack-catalog.md`](../deploy/quack-catalog.md). |
 
 A blank or unrecognized DSN raises `ValueError` on first use. The
 catalog is opened lazily, so construction alone does not connect. See

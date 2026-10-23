@@ -103,11 +103,16 @@ in-process query engine that reads both transparently.
 - **Catalog engine:** Postgres (same as iCAT — one cluster can host
   both schemas) for hosted/multi-writer deployments. A single-writer
   **DuckDB-file catalog** (`catalog_duckdb.py`) also exists for
-  local-install use. `catalog.open_catalog(dsn)` picks the backend from
-  the DSN: `postgresql://…` or libpq keywords → `PostgresCatalogStore`;
-  `duckdb://…`, `*.duckdb`, or `:memory:` → `DuckDBCatalogStore`. Both
+  local-install use, and `QuackCatalogStore` (`catalog_quack.py`) shares
+  that file between several writer processes through DuckDB 2.0's Quack
+  server (`mesa-ducklake serve-catalog`; beta). `catalog.open_catalog(dsn)`
+  picks the backend from the DSN: `postgresql://…` or libpq keywords →
+  `PostgresCatalogStore`; `duckdb://…`, `*.duckdb`, or `:memory:` (optional
+  `?storage_version=v1.5.0`) → `DuckDBCatalogStore`; `quack://host:port`
+  (token in `MESA_DUCKLAKE_QUACK_TOKEN`) → `QuackCatalogStore`. All
   implement the `CatalogStore` Protocol in `catalog_base.py`, so any new
-  catalog operation must be added to **both** backends. The DuckDB
+  catalog operation must be added to the Postgres **and** DuckDB backends
+  (Quack inherits the DuckDB SQL). The DuckDB
   backend creates its schema inline, with idempotent `CREATE … IF NOT
   EXISTS` and no FKs. `migrations/` and `apply_migrations` are
   Postgres-only, so a Postgres schema change usually needs a matching
@@ -189,7 +194,8 @@ WHERE rn = 1 AND op = 'add';
 ```
 
 DuckLake snapshots map 1:1 to rows in `mesa.snapshots`. Time-travel
-queries either set the DuckDB snapshot context or filter on `ts <=`.
+queries filter on `ts <=` (the DuckLake extension's snapshot context is
+not used; see `docs/dev/duckdb-2-migration.md`).
 
 ## Package layout
 
@@ -198,11 +204,14 @@ is public; everything else under `src/mesa_ducklake/` is internal. The
 pieces that aren't obvious from the file names:
 
 - `catalog.py`: `PostgresCatalogStore` and the `open_catalog` factory.
-  `catalog_duckdb.py` is the DuckDB twin, and `catalog_base.py` holds the
-  shared `CatalogStore` Protocol.
+  `catalog_duckdb.py` is the DuckDB twin (one cursor per statement: DuckDB
+  2.0 rejects concurrent use of a connection), `catalog_quack.py` serves it
+  to several processes, and `catalog_base.py` holds the shared
+  `CatalogStore` Protocol.
 - `lake.py`: `LakeStore`, the `LakeStorage` Protocol, and
   `LocalLakeStorage`. It opens an in-memory DuckDB connection per call and
-  exposes a `read_parquet` glob as the `avu_changes` view. Parquet output
+  exposes `read_parquet` over the cached snapshot files as the
+  `avu_changes` view. Parquet output
   is `ORDER BY`-deterministic, which is what makes iRODS re-pushes
   idempotent.
 - `irods_sync.py`: push/pull between the local cache and
@@ -265,7 +274,7 @@ diff = client.diff(project.project_id,
 
 ## Dependencies
 
-- **Required:** `duckdb` (>=1.1), `psycopg[binary]` (Postgres driver),
+- **Required:** `duckdb` (>=2.0,<3), `psycopg[binary]` (Postgres driver),
   `pydantic` (models), `python-irodsclient` (for reading/writing
   `/.mesa/ducklake/` Parquet files into iRODS).
 - **Dev:** `pytest`, `pytest-postgresql` (ephemeral Postgres for tests),

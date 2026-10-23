@@ -1,6 +1,6 @@
 """``mesa-ducklake`` command-line entry point.
 
-Three verbs:
+Four verbs:
 
 * ``record`` — the rule-engine callback path. Reads a single JSON
   object from stdin describing one AVU change and records it. See
@@ -12,10 +12,16 @@ Three verbs:
 * ``migrate [--target N]`` — apply pending Postgres migrations. On a
   DuckDB-file catalog there is nothing to migrate (that backend creates
   its schema on open), so it bootstraps the file and reports
-  ``applied: 0``.
+  ``applied: 0``. On a ``quack://`` catalog it checks the served schema.
+* ``serve-catalog [--host H] [--port P] [--allow-other-hostname]`` —
+  serve a DuckDB-file catalog over DuckDB's Quack protocol so several
+  writer processes can share it through ``quack://H:P`` DSNs. Bootstraps
+  the schema, prints ``{"serving": "quack:H:P"}``, and runs until SIGTERM
+  or SIGINT. Needs ``MESA_DUCKLAKE_QUACK_TOKEN``.
 
 ``MESA_DUCKLAKE_DSN`` selects the catalog for every verb: a
-``postgresql://`` URI or libpq keyword DSN, or ``duckdb:///abs/path.duckdb``.
+``postgresql://`` URI or libpq keyword DSN, ``duckdb:///abs/path.duckdb``
+(optionally ``?storage_version=v1.5.0``), or ``quack://host:port``.
 
 This CLI is the **only** sanctioned non-Python interface to
 mesa-ducklake. Everything else uses :class:`DuckLakeClient`.
@@ -61,14 +67,17 @@ Exit codes
 * ``2`` — path is not within any MESA-enabled project (``record``
   only; the rule may silently skip this one)
   — or, for ``migrate``, the migration failed
-* ``3`` — ``MESA_DUCKLAKE_DSN`` is unset
+* ``3`` — ``MESA_DUCKLAKE_DSN`` is unset (or, for ``serve-catalog``,
+  ``MESA_DUCKLAKE_QUACK_TOKEN``)
 """
 
 from __future__ import annotations
 
 import json
 import os
+import signal
 import sys
+import threading
 from datetime import datetime
 from typing import IO, Any
 from uuid import UUID
@@ -152,7 +161,7 @@ def main(
         verb = "record"
     else:
         verb = argv[0]
-    if verb not in {"record", "recover", "migrate"}:
+    if verb not in {"record", "recover", "migrate", "serve-catalog"}:
         _stderr_json(
             stderr,
             {"code": "unknown_verb", "message": f"unknown verb {verb!r}"},
@@ -168,8 +177,8 @@ def main(
                 "message": (
                     "MESA_DUCKLAKE_DSN environment variable is unset. "
                     "Set it to the mesa-ducklake catalog DSN: "
-                    "postgresql://… (or a libpq keyword DSN) or "
-                    "duckdb:///abs/path.duckdb."
+                    "postgresql://… (or a libpq keyword DSN), "
+                    "duckdb:///abs/path.duckdb, or quack://host:port."
                 ),
             },
         )
@@ -180,6 +189,9 @@ def main(
 
     if verb == "migrate":
         return _migrate(dsn, argv[1:], stdout, stderr)
+
+    if verb == "serve-catalog":
+        return _serve_catalog(dsn, argv[1:], stdout, stderr)
 
     try:
         raw = stdin.read()
@@ -240,10 +252,11 @@ def _migrate(
 
     try:
         backend = catalog_backend(dsn)
-        if backend == "duckdb":
+        if backend in ("duckdb", "quack"):
             # The DuckDB catalog has no migration history: opening it runs
-            # its idempotent schema bootstrap. Doing that here still gives
-            # operators one command that prepares either backend.
+            # its idempotent schema bootstrap (or, over Quack, checks the
+            # server ran it). Doing that here still gives operators one
+            # command that prepares any backend.
             open_catalog(dsn).close()
             applied = 0
         else:
@@ -257,6 +270,95 @@ def _migrate(
 
     json.dump({"applied": applied, "target": target, "backend": backend}, stdout)
     stdout.write("\n")
+    return 0
+
+
+def _serve_catalog(
+    dsn: str, args: list[str], stdout: IO[str], stderr: IO[str]
+) -> int:
+    """Serve a DuckDB-file catalog over Quack until SIGTERM/SIGINT.
+
+    The Quack server runs on DuckDB's own threads; this function only
+    keeps the process (and so the file lock) alive, then stops the server
+    and closes the file cleanly so DuckDB checkpoints it.
+    """
+    from mesa_ducklake.catalog import catalog_backend, open_catalog
+    from mesa_ducklake.catalog_duckdb import DuckDBCatalogStore
+    from mesa_ducklake.catalog_quack import QUACK_TOKEN_ENV
+
+    usage = "usage: mesa-ducklake serve-catalog [--host H] [--port P] [--allow-other-hostname]"
+    host, port, allow_other_hostname = "localhost", 9494, False
+    i = 0
+    try:
+        while i < len(args):
+            if args[i] == "--host":
+                host = args[i + 1]
+                i += 2
+            elif args[i] == "--port":
+                port = int(args[i + 1])
+                i += 2
+            elif args[i] == "--allow-other-hostname":
+                allow_other_hostname = True
+                i += 1
+            else:
+                raise ValueError(f"unknown argument {args[i]!r}")
+    except (IndexError, ValueError) as exc:
+        _stderr_json(stderr, {"code": "invalid_input", "message": f"{exc}; {usage}"})
+        return 1
+
+    try:
+        backend = catalog_backend(dsn)
+    except ValueError as exc:
+        _stderr_json(stderr, {"code": "invalid_input", "message": str(exc)})
+        return 1
+    if backend != "duckdb":
+        _stderr_json(
+            stderr,
+            {
+                "code": "invalid_input",
+                "message": (
+                    "serve-catalog serves a DuckDB-file catalog; MESA_DUCKLAKE_DSN "
+                    f"must be duckdb:///abs/path.duckdb, not a {backend} DSN"
+                ),
+            },
+        )
+        return 1
+
+    token = os.environ.get(QUACK_TOKEN_ENV)
+    if not token:
+        _stderr_json(
+            stderr,
+            {
+                "code": "missing_token",
+                "message": f"{QUACK_TOKEN_ENV} is unset; clients must present this token",
+            },
+        )
+        return 3
+
+    listen_uri = f"quack:{host}:{port}"
+    stop = threading.Event()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, lambda *_: stop.set())
+
+    store = open_catalog(dsn)
+    assert isinstance(store, DuckDBCatalogStore)
+    try:
+        store.serve_quack(listen_uri, token, allow_other_hostname=allow_other_hostname)
+    except Exception as exc:
+        store.close()
+        _stderr_json(
+            stderr, {"code": "serve_failed", "message": f"{type(exc).__name__}: {exc}"}
+        )
+        return 1
+
+    json.dump({"serving": listen_uri}, stdout)
+    stdout.write("\n")
+    stdout.flush()
+    try:
+        stop.wait()
+    finally:
+        store.stop_quack(listen_uri)
+        store.close()
     return 0
 
 

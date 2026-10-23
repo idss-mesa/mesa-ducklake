@@ -85,6 +85,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
+          python -c "import duckdb; print('duckdb', duckdb.__version__)"
 
       - name: Run the suite
         run: pytest -q
@@ -104,6 +105,22 @@ jobs:
           fi
           if ! grep -qE '[0-9]+ passed' /tmp/pg.txt; then
             echo "::error::no requires_postgres tests ran"
+            exit 1
+          fi
+
+      - name: Assert the Quack tests actually ran
+        # Same guard for the quack:// catalog backend: its tests skip
+        # when DuckDB's quack extension cannot be installed, which would
+        # leave the multi-writer path untested on a green run.
+        run: |
+          set -euo pipefail
+          pytest -q -m requires_quack --no-header -rN | tee /tmp/quack.txt
+          if grep -qE '[0-9]+ skipped' /tmp/quack.txt; then
+            echo "::error::requires_quack tests were SKIPPED — the quack extension did not load"
+            exit 1
+          fi
+          if ! grep -qE '[0-9]+ passed' /tmp/quack.txt; then
+            echo "::error::no requires_quack tests ran"
             exit 1
           fi
 

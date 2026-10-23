@@ -73,6 +73,8 @@ for those modes.
   catalog database and `mesa-ducklake migrate`.
 - [DuckDB catalog](./deploy/duckdb-catalog.md): the single-file,
   single-writer catalog for local installs.
+- [Quack catalog server](./deploy/quack-catalog.md): serving that file
+  to several writer processes over DuckDB 2.0's Quack protocol (beta).
 - [Backup](./deploy/backup.md): daily `pg_dump` to iRODS, the
   recovery procedure, and backing up a DuckDB-file catalog.
 - [iRODS rules](./deploy/irods-rules.md): installing the rule
