@@ -48,7 +48,12 @@ mesa-ducklake serve-catalog --port 9494
 - The command runs until SIGTERM or SIGINT, then stops the server and
   closes the file cleanly, so DuckDB checkpoints it.
 - `deploy/mesa-ducklake-catalog.service` is a systemd unit for this.
-  It reads the token from `/etc/mesa-ducklake/quack_token`.
+  It reads the token from `/etc/mesa-ducklake/quack_token` (create it,
+  readable by the service user, before the first start). systemd creates
+  `/var/lib/mesa-ducklake` for the catalog file and DuckDB's extension
+  cache (`StateDirectory=`), so no other directories need to exist. The
+  first start downloads the quack extension, so the host needs outbound
+  HTTPS then.
 
 A file catalog that was used directly before can be served as is;
 DuckDB 2.0 keeps reading and writing the file in its existing format.

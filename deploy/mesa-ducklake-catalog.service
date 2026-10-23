@@ -12,6 +12,13 @@ Type=simple
 User=exouser
 Group=exouser
 
+# systemd creates /var/lib/mesa-ducklake (owned by User=) and keeps it
+# writable under ProtectSystem=strict. HOME points there too, so DuckDB's
+# extension cache (~/.duckdb, where quack is installed on first run) lands
+# in a directory that exists and is writable on a fresh host.
+StateDirectory=mesa-ducklake
+StateDirectoryMode=0750
+Environment=HOME=/var/lib/mesa-ducklake
 Environment=MESA_DUCKLAKE_DSN=duckdb:///var/lib/mesa-ducklake/catalog.duckdb
 # The token every client presents. Kept out of the unit so it is not
 # world-readable via ``systemctl show``.
@@ -25,11 +32,10 @@ RestartSec=5
 
 SyslogIdentifier=mesa-ducklake-catalog
 
-# Security hardening — reads the token, writes only the catalog
-# directory, and installs the quack extension under ~/.duckdb on first run.
+# Security hardening — reads the token and writes only the state
+# directory above (catalog file + DuckDB extension cache).
 NoNewPrivileges=yes
 ProtectSystem=strict
-ReadWritePaths=/var/lib/mesa-ducklake /home/exouser/.duckdb
 PrivateTmp=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
