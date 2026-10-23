@@ -46,6 +46,8 @@ The backend is chosen from the DSN, as with `DuckLakeClient(catalog_dsn=...)`:
 | libpq keyword DSN containing `host=` or `dbname=` | Postgres |
 | `duckdb:///abs/path/catalog.duckdb` | DuckDB file (recommended form: absolute path) |
 | `duckdb://relative.duckdb`, `something.duckdb`, `:memory:` | DuckDB file, resolved relative to the CWD (or in-memory) |
+| any DuckDB form plus `?storage_version=v1.5.0` | DuckDB file that DuckDB 1.x can still open (applies when the file is created) |
+| `quack://host:port` | DuckDB file served by `mesa-ducklake serve-catalog`; token in `MESA_DUCKLAKE_QUACK_TOKEN` |
 
 ```bash
 export MESA_DUCKLAKE_DSN="postgresql://mesa:mesa@localhost:5432/mesa_ducklake"
@@ -60,8 +62,24 @@ A DuckDB-file catalog is **single-writer**: only one OS process can
 hold the file at a time. This fits a local install where the same
 process both writes and reads. It is a poor fit for the rule-callback
 path, where `record` runs on the iRODS server host once per AVU event,
-possibly concurrently. Use Postgres there. See
-[`../deploy/duckdb-catalog.md`](../deploy/duckdb-catalog.md).
+possibly concurrently. Use Postgres there, or serve the file with
+`serve-catalog` and use a `quack://` DSN. See
+[`../deploy/duckdb-catalog.md`](../deploy/duckdb-catalog.md) and
+[`../deploy/quack-catalog.md`](../deploy/quack-catalog.md).
+
+### `serve-catalog`
+
+```bash
+MESA_DUCKLAKE_DSN=duckdb:///var/lib/mesa-ducklake/catalog.duckdb \
+MESA_DUCKLAKE_QUACK_TOKEN=… \
+    mesa-ducklake serve-catalog [--host localhost] [--port 9494] [--allow-other-hostname]
+# {"serving": "quack:localhost:9494"}
+```
+
+Serves a DuckDB-file catalog over Quack until SIGTERM/SIGINT, creating
+the schema first. Exit codes: `1` for bad arguments, a non-DuckDB DSN,
+or a server that fails to start; `3` when `MESA_DUCKLAKE_QUACK_TOKEN`
+is unset.
 
 The CLI does not read `config.yaml.example`, which is only a hint for
 human operators.

@@ -23,6 +23,11 @@ mesa-ducklake is two stores, not one:
   - `DuckDBCatalogStore` (`catalog_duckdb.py`) uses a single local
     `.duckdb` file for single-user or local installs. It is
     single-writer, and its schema is bootstrapped inline on open.
+  - `QuackCatalogStore` (`catalog_quack.py`) reaches that same file
+    through `mesa-ducklake serve-catalog`, DuckDB 2.0's Quack server,
+    so several processes can write it. It reuses the DuckDB SQL and
+    never bootstraps the schema itself. See
+    [`../deploy/quack-catalog.md`](../deploy/quack-catalog.md).
 
   `open_catalog(dsn)` in `catalog.py` picks the backend from the DSN.
   See [`../deploy/duckdb-catalog.md`](../deploy/duckdb-catalog.md).
@@ -327,6 +332,10 @@ writes still sync to iRODS.
   iRODS for catalog durability.
 - [`../deploy/duckdb-catalog.md`](../deploy/duckdb-catalog.md) — the
   DuckDB-file catalog backend.
+- [`../deploy/quack-catalog.md`](../deploy/quack-catalog.md) — serving
+  it to several writers.
+- [`duckdb-2-migration.md`](./duckdb-2-migration.md) — the DuckDB 2.0
+  upgrade, and why the native DuckLake 1.1 extension is not used yet.
 - [`architecture-review-2026-09.md`](./architecture-review-2026-09.md) —
   point-in-time architecture review.
 - [`../user/cli.md`](../user/cli.md) — the `mesa-ducklake recover`

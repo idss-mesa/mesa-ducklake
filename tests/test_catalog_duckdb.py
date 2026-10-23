@@ -1,15 +1,26 @@
-"""DuckDBCatalogStore CRUD against an in-memory / tmp DuckDB file (no Postgres)."""
+"""DuckDBCatalogStore CRUD against an in-memory / tmp DuckDB file (no Postgres).
+
+The ``store`` fixture also runs every contract test against the same
+catalog served over Quack (``QuackCatalogStore``), since that backend
+shares this SQL and differs only in how it is executed.
+"""
+
+import threading
 
 import duckdb
 import pytest
 
+from mesa_ducklake.catalog import open_catalog
 from mesa_ducklake.catalog_duckdb import DuckDBCatalogStore
 from mesa_ducklake.models import PARQUET_FILE_PENDING
 
 
-@pytest.fixture
-def store(tmp_path):
-    s = DuckDBCatalogStore(str(tmp_path / "catalog.duckdb"))
+@pytest.fixture(params=["file", pytest.param("quack", marks=pytest.mark.requires_quack)])
+def store(request, tmp_path):
+    if request.param == "file":
+        s = DuckDBCatalogStore(str(tmp_path / "catalog.duckdb"))
+    else:
+        s = open_catalog(request.getfixturevalue("quack_dsn"))
     yield s
     s.close()
 
@@ -174,3 +185,52 @@ def test_close_is_idempotent(tmp_path):
     s = DuckDBCatalogStore(str(tmp_path / "idem.duckdb"))
     s.close()
     s.close()  # second close must not raise
+
+
+def test_concurrent_threads_share_one_store(store):
+    # mesa-mcp calls the catalog from concurrent tool threads; DuckDB 2.0
+    # raises ResourceInUseException if they share a connection unguarded.
+    p = _project(store)
+    errors: list[BaseException] = []
+    ids: list[int] = []
+    lock = threading.Lock()
+
+    def work() -> None:
+        try:
+            for _ in range(10):
+                s = store.create_snapshot(p.project_id, "u", None, None, PARQUET_FILE_PENDING)
+                store.insert_pending_push(s.snapshot_id, "/l", "/i")
+                with lock:
+                    ids.append(s.snapshot_id)
+        except BaseException as exc:  # noqa: BLE001 - surfaced by the assert below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=work) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == []
+    assert len(set(ids)) == 40
+    assert len(store.list_pending_pushes(limit=100)) == 40
+
+
+def _storage_version(path) -> str:
+    con = duckdb.connect(str(path), read_only=True)
+    try:
+        (tags,) = con.execute(
+            "SELECT tags FROM duckdb_databases() WHERE NOT internal AND database_name <> 'memory'"
+        ).fetchone()
+    finally:
+        con.close()
+    return tags["storage_version"]
+
+
+def test_default_storage_version_is_2_0(tmp_path):
+    DuckDBCatalogStore(tmp_path / "c.duckdb").close()
+    assert _storage_version(tmp_path / "c.duckdb").startswith("v2.")
+
+
+def test_storage_version_keeps_file_readable_by_1_5(tmp_path):
+    open_catalog(f"duckdb://{tmp_path / 'c.duckdb'}?storage_version=v1.5.0").close()
+    assert _storage_version(tmp_path / "c.duckdb").startswith("v1.5")

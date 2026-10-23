@@ -5,8 +5,15 @@ for single-user / local-install deployments that don't want to run Postgres.
 Implements the same surface as PostgresCatalogStore (see
 :class:`mesa_ducklake.catalog_base.CatalogStore`).
 
-Single-writer: one OS process holds the DuckDB file lock at a time. Use the
-Postgres backend for concurrent/hosted multi-writer deployments.
+Single-writer: one OS process holds the DuckDB file lock at a time. For
+several writer processes, serve the file with ``mesa-ducklake serve-catalog``
+and point the writers at it with a ``quack://`` DSN
+(:mod:`mesa_ducklake.catalog_quack`), or use the Postgres backend.
+
+Every statement runs on its own cursor and drains its result. DuckDB 2.0
+raises ``ResourceInUseException`` when a connection is used from two
+threads at once or while an earlier result is still open, and mesa-mcp
+calls the catalog from concurrent tool threads.
 
 ``project_id`` is stored as TEXT (UUID string form) — matching how the
 Parquet data plane stores it — to avoid UUID parameter-binding edge cases;
@@ -109,29 +116,53 @@ def _row_to_pending_push(d: dict[str, Any]) -> PendingPush:
 
 
 class DuckDBCatalogStore:
-    """Catalog backend over a single DuckDB file. See module docstring."""
+    """Catalog backend over a single DuckDB file. See module docstring.
 
-    def __init__(self, path: str | Path) -> None:
+    ``storage_version`` (e.g. ``"v1.5.0"``) is passed to DuckDB as
+    ``storage_compatibility_version``. It only affects files this process
+    creates: DuckDB 2.0 writes a format 1.x cannot open, so a deployment
+    whose catalog file is also opened by 1.x hosts sets it.
+    """
+
+    def __init__(self, path: str | Path, *, storage_version: str | None = None) -> None:
         self._path = str(path)
         if self._path != ":memory:":
             resolved = Path(self._path).expanduser()
             resolved.parent.mkdir(parents=True, exist_ok=True)
             self._path = str(resolved)
-        self._conn = duckdb.connect(self._path)
-        for stmt in _SCHEMA_STATEMENTS:
-            self._conn.execute(stmt)
+        config: dict[str, Any] = (
+            {"storage_compatibility_version": storage_version} if storage_version else {}
+        )
+        self._conn = duckdb.connect(self._path, config=config)
         self._closed = False
+        self._bootstrap()
+
+    def _bootstrap(self) -> None:
+        for stmt in _SCHEMA_STATEMENTS:
+            self._run(stmt, [])
 
     # ------------------------------------------------------------------ helpers
+    def _run(self, sql: str, params: list[Any]) -> tuple[Any, list[tuple]]:
+        """Execute on a fresh cursor and return ``(description, rows)``.
+
+        The result is fully drained and the cursor closed before returning,
+        so nothing stays open on the shared connection.
+        """
+        cur = self._conn.cursor()
+        try:
+            cur.execute(sql, params)
+            desc = cur.description
+            return desc, cur.fetchall() if desc else []
+        finally:
+            cur.close()
+
     def _one(self, sql: str, params: list[Any]) -> dict[str, Any] | None:
-        cur = self._conn.execute(sql, params)
-        desc = cur.description
-        return _to_dict(desc, cur.fetchone())
+        desc, rows = self._run(sql, params)
+        return _to_dict(desc, rows[0] if rows else None)
 
     def _all(self, sql: str, params: list[Any]) -> list[dict[str, Any]]:
-        cur = self._conn.execute(sql, params)
-        desc = cur.description
-        return [{col[0]: val for col, val in zip(desc, r, strict=True)} for r in cur.fetchall()]
+        desc, rows = self._run(sql, params)
+        return [{col[0]: val for col, val in zip(desc, r, strict=True)} for r in rows]
 
     # ------------------------------------------------------------------ projects
     def register_project(self, irods_path, irods_zone, ducklake_path, created_by) -> Project:
@@ -196,8 +227,8 @@ class DuckDBCatalogStore:
     def delete_snapshot(self, snapshot_id) -> None:
         # No FK ON DELETE CASCADE in the DuckDB schema, so mirror the
         # Postgres cascade explicitly: drop any pending-push child first.
-        self._conn.execute("DELETE FROM mesa.pending_pushes WHERE snapshot_id = ?", [snapshot_id])
-        self._conn.execute("DELETE FROM mesa.snapshots WHERE snapshot_id = ?", [snapshot_id])
+        self._run("DELETE FROM mesa.pending_pushes WHERE snapshot_id = ?", [snapshot_id])
+        self._run("DELETE FROM mesa.snapshots WHERE snapshot_id = ?", [snapshot_id])
 
     def latest_snapshot_id(self, project_id, *, include_pending=False) -> int | None:
         if include_pending:
@@ -248,17 +279,16 @@ class DuckDBCatalogStore:
 
     # ------------------------------------------------------------------ pending pushes
     def insert_pending_push(self, snapshot_id, local_path, irods_target) -> PendingPush:
-        d: dict[str, Any] | None = None
-        try:
-            d = self._one(
-                """INSERT INTO mesa.pending_pushes (snapshot_id, local_path, irods_target)
-                   VALUES (?, ?, ?)
-                   RETURNING snapshot_id, local_path, irods_target,
-                             attempts, last_error, created_at""",
-                [snapshot_id, local_path, irods_target],
-            )
-        except duckdb.ConstraintException:
-            d = None
+        # ON CONFLICT rather than catching ConstraintException: in DuckDB 2.0
+        # a failed statement aborts the surrounding transaction.
+        d = self._one(
+            """INSERT INTO mesa.pending_pushes (snapshot_id, local_path, irods_target)
+               VALUES (?, ?, ?)
+               ON CONFLICT (snapshot_id) DO NOTHING
+               RETURNING snapshot_id, local_path, irods_target,
+                         attempts, last_error, created_at""",
+            [snapshot_id, local_path, irods_target],
+        )
         if d is None:
             d = self._one(
                 """SELECT snapshot_id, local_path, irods_target,
@@ -270,7 +300,7 @@ class DuckDBCatalogStore:
         return _row_to_pending_push(d)
 
     def delete_pending_push(self, snapshot_id) -> None:
-        self._conn.execute("DELETE FROM mesa.pending_pushes WHERE snapshot_id = ?", [snapshot_id])
+        self._run("DELETE FROM mesa.pending_pushes WHERE snapshot_id = ?", [snapshot_id])
 
     def bump_pending_push_attempt(
         self, snapshot_id, error, *, error_max_chars=2000
@@ -304,6 +334,25 @@ class DuckDBCatalogStore:
             [snapshot_id],
         )
         return _row_to_pending_push(d) if d else None
+
+    # ------------------------------------------------------------------ serving
+    def serve_quack(
+        self, listen_uri: str, token: str, *, allow_other_hostname: bool = False
+    ) -> None:
+        """Serve this catalog over Quack at ``listen_uri`` (``quack:host:port``).
+
+        Returns once the server is listening; it runs on DuckDB's own
+        threads until :meth:`stop_quack` or :meth:`close`.
+        """
+        self._run("INSTALL quack", [])
+        self._run("LOAD quack", [])
+        self._run(
+            "SELECT * FROM quack_serve(?, token := ?, allow_other_hostname := ?)",
+            [listen_uri, token, allow_other_hostname],
+        )
+
+    def stop_quack(self, listen_uri: str) -> None:
+        self._run("SELECT * FROM quack_stop(?)", [listen_uri])
 
     # ------------------------------------------------------------------ lifecycle
     def close(self) -> None:

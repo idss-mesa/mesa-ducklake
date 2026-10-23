@@ -9,7 +9,7 @@ without notice.
 from mesa_ducklake.client import DuckLakeClient
 from mesa_ducklake.models import AvuChange, Project, Snapshot
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "AvuChange",

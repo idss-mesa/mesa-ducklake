@@ -18,6 +18,10 @@ How mesa-mcp's `ducklake.catalog_dsn` setting selects the catalog:
 - **Local-install:** a DuckDB file (`duckdb:///abs/path/catalog.duckdb`).
   No database server is needed, but only one process can write to the
   file at a time. See [`docs/deploy/duckdb-catalog.md`](./docs/deploy/duckdb-catalog.md).
+- **Several writers without Postgres** (e.g. parallel DE VMs): serve the
+  DuckDB file with `mesa-ducklake serve-catalog` and use
+  `quack://host:port`. Beta; see
+  [`docs/deploy/quack-catalog.md`](./docs/deploy/quack-catalog.md).
 - **Blank**, the usual VICE-app setting: AVU writes still succeed but
   are not recorded.
 
@@ -31,7 +35,7 @@ audiences:
 
 - **Users** — [`docs/user/usage.md`](./docs/user/usage.md) for the
   `DuckLakeClient` Python API, [`docs/user/cli.md`](./docs/user/cli.md) for the
-  `mesa-ducklake` CLI (`record`, `recover`, `migrate`), and
+  `mesa-ducklake` CLI (`record`, `recover`, `migrate`, `serve-catalog`), and
   [`docs/user/time-travel.md`](./docs/user/time-travel.md) for `get_avus_as_of`
   patterns.
 - **Developers** — [`docs/dev/architecture.md`](./docs/dev/architecture.md),
@@ -45,6 +49,7 @@ audiences:
   Design records are in [`docs/design/`](./docs/design/README.md).
 - **Operators** — [`docs/deploy/postgres.md`](./docs/deploy/postgres.md),
   [`docs/deploy/duckdb-catalog.md`](./docs/deploy/duckdb-catalog.md),
+  [`docs/deploy/quack-catalog.md`](./docs/deploy/quack-catalog.md),
   [`docs/deploy/backup.md`](./docs/deploy/backup.md) for the daily
   ``pg_dump`` to iRODS and recovery procedure,
   [`docs/deploy/irods-rules.md`](./docs/deploy/irods-rules.md), and

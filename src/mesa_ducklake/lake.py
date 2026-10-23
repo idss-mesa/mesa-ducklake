@@ -212,10 +212,10 @@ class LakeStore:
     def _open_read_con(self) -> duckdb.DuckDBPyConnection:
         """Open an in-memory DuckDB connection ready to read the lake.
 
-        If no Parquet files exist yet, DuckDB's ``read_parquet`` over a
-        glob errors out. We work around this by creating a typed empty
-        view so the caller's queries don't have to special-case
-        emptiness.
+        The view reads an explicit list of the cached snapshot files.
+        ``read_parquet`` errors on an empty list, so with no files yet we
+        create a typed empty view instead and the caller's queries don't
+        have to special-case emptiness.
         """
         con = duckdb.connect(":memory:")
         existing = self._storage.existing_parquet_files()
