@@ -220,3 +220,13 @@ __marimo__/
 # Live e2e run artifacts (tests/llm_e2e) and local LLM stack secrets
 .llm-e2e-results/
 deploy/llm-e2e/.env
+
+# --- Claude Code local settings & MCP configs (may contain secrets) ---
+# See the claude-project-template repo ("Claude Project Gitignore").
+.claude/settings.local.json
+.claude/*.local.json
+.claude/*.local.md
+CLAUDE.local.md
+.mcp.json
+.claude/mcp.json
+/claude_desktop_config.json
