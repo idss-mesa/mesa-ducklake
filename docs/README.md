@@ -35,6 +35,24 @@ mesa-mcp has three relevant modes:
 See [mesa-mcp's user docs](https://github.com/idss-mesa/mesa-mcp/tree/main/docs/user)
 for those modes.
 
+## Common questions
+
+- *Is this the DuckDB `ducklake` extension? Why not use it?* No. It
+  uses the DuckLake pattern: its own catalog plus plain Parquet. See
+  [DuckDB / DuckLake usage today](./dev/architecture.md#duckdb--ducklake-usage-today)
+  and [Porting the history to the `ducklake` extension](./dev/architecture.md#porting-the-history-to-the-ducklake-extension).
+- *A project has both `.mesa/ducklake/` and a `*.ducklake` file. Which
+  is which?* `.mesa/ducklake/` is this library's AVU history. A
+  `*.ducklake` file is the project's own extension-format lake. See
+  [Not to be confused with a project's own DuckLake](./dev/architecture.md#not-to-be-confused-with-a-projects-own-ducklake).
+- *Can I read or copy a project's history without the catalog?* Yes,
+  read-only, with `read_parquet`. See
+  [Reading a project's history without the catalog](./deploy/per-project-storage.md#reading-a-projects-history-without-the-catalog).
+- *Are the Parquet files written straight to the Data Store?* No.
+  They go to a local cache, are pushed with a checksum check, and the
+  catalog row is committed after the push. See
+  [Write protocol](./dev/architecture.md#write-protocol-push-before-commit).
+
 ## Table of contents
 
 ### User
