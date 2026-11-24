@@ -58,6 +58,73 @@ of those files that are missing into the local cache
 `snapshot_*.parquet` it finds in that cache directory
 (`existing_parquet_files`).
 
+Two more points about the files:
+
+- **Gaps in the numbering are normal.** `snapshot_id` comes from one
+  sequence that the whole catalog shares, so other projects' snapshots
+  use up numbers too. A snapshot that failed before it committed also
+  leaves a gap.
+- **The files are written locally first.** DuckDB can't write to
+  iRODS, so each file is written to the local cache and then pushed
+  here with a checksum check. Its catalog row is committed only after
+  the push. See [the write protocol](../dev/architecture.md#write-protocol-push-before-commit).
+
+## Reading a project's history without the catalog
+
+The catalog is not stored in iRODS. It lives wherever the
+deployment's `catalog_dsn` points, for example a Postgres server or
+a local install's `~/.mesa/ducklake/catalog.duckdb`. Even so, a
+project's `.mesa/ducklake/` can be read on its own, because every
+Parquet row carries its `project_id`, `snapshot_id`, `ts`, `actor`,
+`source` and `op`. That makes the files plain Parquet. They are
+**not** a DuckLake-extension lake, so `ATTACH 'ducklake:…'` won't
+open them (see
+[architecture](../dev/architecture.md#duckdb--ducklake-usage-today)).
+
+Read-only access needs nothing but DuckDB. With iRODS tools, copy the
+files first (`gocmd get` / `iget -r <project>/.mesa/ducklake`). A
+collection that is deliberately published anonymously, as
+neon-ducklake is, can be read in place over HTTPS. Publishing the
+project publishes its AVU history too. That is the exception to
+[ACLs and ownership](#acls-and-ownership), not a reason to relax it
+for other projects. `read_parquet` can't glob an HTTP directory, so list the files
+yourself:
+
+```sql
+INSTALL httpfs; LOAD httpfs;
+SET VARIABLE base = 'https://data.cyverse.org/dav-anon/iplant/home/tswetnam/neon-ducklake/.mesa/ducklake/';
+CREATE VIEW avu_changes AS
+SELECT * FROM read_parquet([
+    getvariable('base') || 'snapshot_5.parquet',
+    getvariable('base') || 'snapshot_10.parquet'   -- one entry per file in the listing
+]);
+
+SELECT snapshot_id, count(*) AS n, min(ts), max(ts), any_value(source)
+FROM avu_changes GROUP BY 1 ORDER BY 1;
+```
+
+The effective-AVU query in [`../dev/queries.md`](../dev/queries.md)
+runs unchanged against that view.
+
+What the files alone don't give you:
+
+- **The snapshot index.** That means notes, `parent_snapshot`, and
+  which snapshots are `pending` or `failed`. The push happens before
+  the commit, so a crash between the two leaves a file here for a
+  snapshot that stays `pending` until `mesa-ducklake recover` runs.
+  Apart from that window, the files here are the committed history.
+- **`DuckLakeClient` reads.** The client lists snapshots from its
+  catalog before it reads any Parquet. A fresh catalog doesn't know
+  about the copied files, and a project registered there gets a new
+  `project_id` that the copied rows don't carry. There is no "rebuild
+  the catalog from Parquet" command today. To test the client against
+  real history, use plain SQL over a read-only copy, or record the
+  copied rows into a scratch project with `record_changes`.
+
+Never copy history files into another project's `.mesa/ducklake/`.
+They would mix two projects' rows in one collection, and that
+project's catalog would not list them.
+
 ## Configuring the sub-collection
 
 The sub-collection name is configurable per client:

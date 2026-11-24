@@ -223,6 +223,83 @@ directly. Adopting DuckLake's snapshot-aware reads is an open
 design item; the public API is shaped so that change is invisible
 to callers.
 
+So "DuckLake" in this project's name means the *pattern*: a SQL
+catalog that indexes immutable Parquet snapshots. It does not mean
+the extension's on-disk format. A project's `.mesa/ducklake/`
+collection is not something you can open with
+`ATTACH 'ducklake:…'`. Read it with `read_parquet` (see
+[Reading a project's history without the catalog](../deploy/per-project-storage.md#reading-a-projects-history-without-the-catalog)).
+
+### Not to be confused with a project's own DuckLake
+
+A MESA project can also contain a real DuckLake (extension format)
+holding its *science* data, for example
+`/iplant/home/tswetnam/neon-ducklake/ducklake/neon_catalog.ducklake`
+plus `ducklake/data/` in
+[neon-ducklake](https://github.com/idss-mesa/neon-ducklake). That lake
+belongs to the project, not to mesa-ducklake. mesa-ducklake neither
+reads nor writes it, and only records the AVUs placed on its files.
+In the same collection, `.mesa/ducklake/` holds this library's AVU
+history. The two share a name and nothing else.
+
+### Porting the history to the `ducklake` extension
+
+The design record for the DuckDB catalog backend made "replace the
+hand-rolled catalog and lake with the real extension" an explicit
+non-goal, because it re-architects working code
+([design record](../design/2026-06-07-duckdb-catalog-backend-design.md#non-goals-this-iteration)).
+It is still open. A port behind the same `DuckLakeClient` must keep
+the following properties, which the current code relies on. Each one
+is a question to answer in the port's design record, not a reason
+the port can't be done.
+
+- **No direct writes to iRODS.** DuckDB, and so the extension, can't
+  write to an iRODS collection. `DATA_PATH` has to be a local path or
+  an object store DuckDB supports. Today's flow writes a local cache
+  file, pushes it with a checksum check, and only then commits the
+  catalog row, with `mesa.pending_pushes` as the WAL (see
+  [Write protocol](#write-protocol-push-before-commit)). The
+  extension commits its catalog when the transaction ends, so a port
+  needs another way to keep a snapshot invisible until its file is
+  safely in iRODS.
+- **One catalog, many projects, many data paths.** One mesa catalog
+  indexes every project, and each project's Parquet lives under that
+  project's own iRODS collection. An extension lake has one
+  `DATA_PATH`, but its metadata also stores a `path` per schema and
+  per table (`ducklake_schema.path`, `ducklake_table.path`). So there
+  are two possible mappings. One lake per project keeps each catalog
+  next to its data. One lake with a schema per project keeps a single
+  catalog, but then no project's catalog travels with its data. With
+  either mapping, the cross-project registry (`mesa.projects`) and
+  the push WAL still need a home.
+- **Self-describing files.** Every row of a `snapshot_<id>.parquet`
+  carries `project_id`, `snapshot_id`, `ts`, `actor`, `source` and
+  `op`. Given only `.mesa/ducklake/` and no catalog, plain
+  `read_parquet` still rebuilds the whole history. The extension's
+  data files (`ducklake-<uuid>.parquet`, delete files, inlined rows)
+  can only be read correctly through their `.ducklake` catalog, so a
+  port would have to ship that catalog next to the data for the
+  history to keep [travelling with the data](../deploy/per-project-storage.md#why-per-project-storage).
+- **Idempotent re-push.** Output is ordered with `ORDER BY`, so a
+  recovery re-push of the same snapshot produces the same bytes and
+  checksum.
+- **Time travel by event time.** `get_avus_as_of` filters on the
+  change's `ts`, which callers can set (bulk importers back-date
+  rows to when the AVU was applied). The extension's
+  `AT (TIMESTAMP => …)` uses *commit* time. These differ whenever a
+  batch is recorded after the fact, so the canonical query in
+  [`queries.md`](./queries.md) should stay on `ts`.
+- **Parity.** Both catalog backends have to keep working. The
+  extension supports both Postgres and DuckDB metadata catalogs, so
+  this one maps over directly.
+
+The seams for the port are `LakeStore` (the read and write SQL),
+`LakeStorage` and `irods_sync` (where the files live), and
+`CatalogStore` (snapshot allocation). Callers of `DuckLakeClient`
+should see no change. Prototype the port behind those seams first,
+and write it up in a [design record](../design/README.md) before
+changing the default.
+
 ## iRODS sync sidecar
 
 DuckDB requires real filesystem paths for both `COPY (...) TO '...'`
