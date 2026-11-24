@@ -253,6 +253,11 @@ The design record for the DuckDB catalog backend made "replace the
 hand-rolled catalog and lake with the real extension" an explicit
 non-goal, because it re-architects working code
 ([design record](../design/2026-06-07-duckdb-catalog-backend-design.md#non-goals-this-iteration)).
+The DuckDB 2.0 migration notes name the main obstacle: DuckLake writes
+data files through DuckDB file systems, and iRODS has none. They also
+list what DuckLake 1.1 would bring (built-in time travel, data
+inlining, `ducklake_merge_adjacent_files` for compaction); see
+[Not adopted yet](./duckdb-2-migration.md#not-adopted-yet-the-native-ducklake-11-extension).
 It is still open. A port behind the same `DuckLakeClient` must keep
 the following properties, which the current code relies on. Each one
 is a question to answer in the port's design record, not a reason
@@ -294,9 +299,10 @@ the port can't be done.
   `AT (TIMESTAMP => …)` uses *commit* time. These differ whenever a
   batch is recorded after the fact, so the canonical query in
   [`queries.md`](./queries.md) should stay on `ts`.
-- **Parity.** Both catalog backends have to keep working. The
-  extension supports both Postgres and DuckDB metadata catalogs, so
-  this one maps over directly.
+- **Parity.** The Postgres and DuckDB catalog backends (and the
+  Quack server, which shares the DuckDB SQL) have to keep working.
+  The extension supports both Postgres and DuckDB metadata catalogs,
+  so this one maps over directly.
 
 The seams for the port are `LakeStore` (the read and write SQL),
 `LakeStorage` and `irods_sync` (where the files live), and
