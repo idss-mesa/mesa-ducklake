@@ -1,0 +1,134 @@
+# Questions an AI agent should be able to answer about mesa-ducklake from
+# its published documentation, starting only from
+# https://idss-mesa.github.io/llms.txt. Checked by scripts/answerability.py
+# in idss-mesa/idss-mesa.github.io. The first three are a student's
+# questions from 2026-11-24 that llms.txt could not answer at the time.
+repo: idss-mesa/mesa-ducklake
+questions:
+  - id: why-not-ducklake-extension
+    kind: engineering
+    q: "Why does mesa-ducklake write its own Parquet files and catalog instead of using DuckDB's ducklake extension?"
+    answer: >
+      The extension writes data files through DuckDB file systems, and the
+      iRODS Data Store has none, so the push-before-commit protocol to
+      <project>/.mesa/ducklake/ would need a redesign. Adopting DuckLake 1.1
+      is recorded as a separate design task.
+    must_find:
+      - ['DuckDB file ?systems?']
+      - ['iRODS']
+      - ['push[- ]before[- ]commit']
+    where: docs/dev/duckdb-2-migration.md
+
+  - id: history-vs-project-lake
+    kind: data
+    q: "In a project like neon-ducklake, what is .mesa/ducklake for, and what is ducklake/neon_catalog.ducklake for?"
+    answer: >
+      .mesa/ducklake/ holds the project's AVU metadata history written by
+      mesa-ducklake, as plain snapshot_<id>.parquet files read with
+      read_parquet. ducklake/neon_catalog.ducklake is the project's own
+      ducklake-extension lake of science data, opened with ATTACH.
+    must_find:
+      - ['\.mesa/ducklake']
+      - ['neon_catalog\.ducklake']
+      - ['read_parquet']
+    where: docs/dev/architecture.md
+
+  - id: local-then-upload
+    kind: engineering
+    q: "Are mesa-ducklake's snapshot files written straight to iRODS, or built locally and then uploaded?"
+    answer: >
+      Locally first. Each snapshot is written to a local cache, pushed to
+      iRODS with checksum verification, and only then committed in the
+      catalog; a pending_pushes row covers a crash in between.
+    must_find:
+      - ['push[- ]before[- ]commit']
+      - ['checksum']
+      - ['cache']
+    where: docs/dev/architecture.md
+
+  - id: read-history-without-catalog
+    kind: data
+    q: "Can I read a project's AVU history without access to the catalog database?"
+    answer: >
+      Yes. Each row in the snapshot Parquet files carries its project_id,
+      snapshot_id, ts, actor, source and op, so DuckDB's read_parquet over
+      the files (locally or over HTTPS with httpfs) returns the history.
+      The catalog adds the snapshot index and hides in-flight writes.
+    must_find:
+      - ['read_parquet']
+      - ['httpfs']
+      - ['snapshot_\S*\.parquet']
+    where: docs/deploy/per-project-storage.md
+
+  - id: parquet-columns
+    kind: data
+    q: "What columns does each row of the AVU history have?"
+    answer: >
+      project_id, snapshot_id, irods_path, target_type, attribute, value,
+      unit, op (add or delete), actor, ts, source, via_ticket and
+      rule_invocation.
+    must_find:
+      - ['target_type']
+      - ['via_ticket']
+      - ['rule_invocation']
+    where: docs/dev/schema.md
+
+  - id: snapshot-id-gaps
+    kind: data
+    q: "Why are there gaps in a project's snapshot numbers?"
+    answer: >
+      Snapshot ids come from one sequence shared by all projects, so each
+      project sees only some of the numbers.
+    must_find:
+      - ['gaps?']
+      - ['global across all projects|shared by all projects|all projects']
+    where: docs/dev/schema.md
+
+  - id: time-travel-semantics
+    kind: data
+    q: "When I ask for a path's AVUs as of a time, is that the time of the change or the time it was committed?"
+    answer: >
+      The time of the change: reads filter on each event's ts (ts <= T),
+      which callers can set, not on catalog commit time.
+    must_find:
+      - ['ts <= ']
+      - ['time[- ]travel|as of']
+    where: docs/user/time-travel.md
+
+  - id: crash-recovery
+    kind: engineering
+    q: "What happens if the process dies between pushing a Parquet file and committing the snapshot?"
+    answer: >
+      A mesa.pending_pushes row records the in-flight write. `mesa-ducklake
+      recover` (or recover_pending_pushes) re-pushes if needed, commits the
+      catalog row and deletes the WAL row; after repeated failures the row
+      is marked failed and stays invisible to reads.
+    must_find:
+      - ['pending_pushes']
+      - ['recover']
+      - ['failed']
+    where: docs/dev/architecture.md
+
+  - id: add-catalog-operation
+    kind: engineering
+    q: "How do I add a new catalog operation?"
+    answer: >
+      Add it to the CatalogStore Protocol and implement it in both the
+      Postgres and the DuckDB backend (Quack inherits the DuckDB SQL), with
+      parity tests.
+    must_find:
+      - ['CatalogStore']
+      - ['both backends|Postgres and DuckDB']
+    where: docs/dev/contributing.md
+
+  - id: postgres-tests-skip
+    kind: engineering
+    q: "The test suite passes locally; does that mean the Postgres catalog was tested?"
+    answer: >
+      Not necessarily. Tests marked requires_postgres skip themselves when
+      no server is reachable, so check the skip count; run them with pg_ctl
+      on PATH or by pointing at a server.
+    must_find:
+      - ['requires_postgres']
+      - ['skip']
+    where: docs/dev/contributing.md

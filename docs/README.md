@@ -53,6 +53,13 @@ for those modes.
   catalog row is committed after the push. See
   [Write protocol](./dev/architecture.md#write-protocol-push-before-commit).
 
+These and more are in [`agent-questions.yml`](./agent-questions.yml),
+with reference answers. A weekly check in idss-mesa.github.io
+(`scripts/answerability.py`) confirms that an agent starting from
+<https://idss-mesa.github.io/llms.txt> can reach a page that answers
+each one. When a question comes up that the docs can't answer, add it
+there along with the page that answers it.
+
 ## Table of contents
 
 ### User
